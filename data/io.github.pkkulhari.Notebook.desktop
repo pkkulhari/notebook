@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Notebook
+Comment=A quiet, native Linux notebook
+Exec=notebook
+Icon=accessories-text-editor
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=notes;notebooks;markdown;
+StartupNotify=true

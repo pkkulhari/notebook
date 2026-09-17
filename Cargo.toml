@@ -1,0 +1,36 @@
+[package]
+name = "notebook"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "A quiet, native Linux notebook"
+license = "MIT"
+
+[package.metadata.deb]
+maintainer = "pkkulhari"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+extended-description = "A native GTK4 note-taking app with Markdown editing, notebooks, search, automatic saving, and local SQLite storage."
+assets = [
+    ["target/release/notebook", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/notebook/README.md", "644"],
+    ["data/io.github.pkkulhari.Notebook.desktop", "usr/share/applications/", "644"],
+]
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+pulldown-cmark = "0.13"
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+strip = true

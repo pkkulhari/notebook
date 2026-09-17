@@ -1,0 +1,144 @@
+/* Symbolic GTK colors follow the active theme, including live accent changes. */
+@define-color nb_editor @theme_base_color;
+@define-color nb_sidebar @theme_bg_color;
+@define-color nb_list mix(@theme_base_color, @theme_bg_color, 0.45);
+@define-color nb_text @theme_text_color;
+@define-color nb_muted alpha(@theme_fg_color, 0.65);
+@define-color nb_faint alpha(@theme_fg_color, 0.48);
+@define-color nb_line alpha(@theme_fg_color, 0.09);
+@define-color nb_hover alpha(@theme_fg_color, 0.05);
+@define-color nb_selected alpha(@theme_selected_bg_color, 0.16);
+@define-color nb_accent @theme_selected_bg_color;
+@define-color nb_button @theme_selected_bg_color;
+@define-color nb_button_text @theme_selected_fg_color;
+@define-color nb_input alpha(@theme_fg_color, 0.045);
+
+.notebook-app {
+  background: @nb_editor;
+  color: @nb_text;
+  font-family: "Inter", "Noto Sans", "Cantarell", sans-serif;
+  font-size: 13px;
+}
+.notebook-app headerbar {
+  min-height: 38px;
+  padding: 3px 10px;
+  background: @nb_sidebar;
+  color: @nb_muted;
+  border: none;
+  border-bottom: 1px solid @nb_line;
+  box-shadow: none;
+}
+.brand { font-size: 12px; font-weight: 600; letter-spacing: 0.3px; }
+.sidebar-panel { background: @nb_sidebar; }
+.notes-panel { background: @nb_list; }
+.writing-panel { background: @nb_editor; }
+.pane-heading { padding: 18px 14px 12px 18px; }
+.eyebrow { color: @nb_muted; font-size: 12px; font-weight: 500; }
+.list-heading { padding: 18px 14px 14px 18px; }
+.list-title { font-size: 17px; font-weight: 650; }
+.notebook-app button.flat,
+.notebook-app .quiet-menu > button,
+.notebook-app .location-menu > button {
+  background: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: @nb_muted;
+  min-height: 24px;
+  min-width: 24px;
+  padding: 3px;
+  border-radius: 6px;
+}
+.notebook-app button.flat:hover,
+.notebook-app .quiet-menu > button:hover,
+.notebook-app .location-menu > button:hover { background: @nb_hover; color: @nb_text; }
+.notebook-app .new-note-button {
+  border: none;
+  border-radius: 6px;
+  background: @nb_button;
+  background-image: none;
+  color: @nb_button_text;
+  font-size: 11px;
+  font-weight: 600;
+  min-height: 24px;
+  padding: 4px 8px;
+  box-shadow: none;
+}
+.notebook-app .new-note-button:hover { background: shade(@nb_button, 1.08); }
+.note-search {
+  background: @nb_input;
+  color: @nb_text;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  box-shadow: none;
+  min-height: 30px;
+  padding: 1px 8px;
+  font-size: 12px;
+}
+.note-search:focus-within { border-color: alpha(@nb_accent, 0.65); }
+.note-search image { color: @nb_muted; }
+.note-search text { color: @nb_text; background: transparent; }
+.note-search placeholder { color: @nb_muted; }
+.navigation-sidebar { background: transparent; padding: 0 10px; }
+.navigation-sidebar row {
+  min-height: 30px;
+  padding: 3px 9px;
+  margin-bottom: 3px;
+  border-radius: 6px;
+  color: @nb_muted;
+}
+.navigation-sidebar row image { -gtk-icon-size: 15px; }
+.navigation-sidebar row:hover { background: @nb_hover; color: @nb_text; }
+.navigation-sidebar row:selected { background: @nb_selected; color: @nb_text; }
+.trash-divider { margin: 12px 9px; min-height: 1px; background: @nb_line; }
+.notebook-count { color: @nb_muted; font-size: 12px; font-variant-numeric: tabular-nums; }
+.notebook-options { opacity: 0; }
+row:hover .notebook-options, row:selected .notebook-options,
+row:focus-within .notebook-options, .notebook-options:focus-within { opacity: 1; }
+.note-list { background: transparent; padding: 0 8px; }
+.note-list row {
+  padding: 0;
+  margin-bottom: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: @nb_text;
+}
+.note-list row:hover, .note-list row:selected { background: @nb_hover; color: @nb_text; }
+.note-row { padding: 8px 12px; font-size: 13px; line-height: 1.25; border-left: 2px solid transparent; border-radius: 6px; }
+.note-row.active-note { background: @nb_selected; border-left-color: @nb_accent; }
+.note-title { font-size: 14px; font-weight: 700; }
+.note-preview { color: @nb_muted; font-size: 13px; }
+.note-date { color: @nb_muted; font-size: 11px; }
+.list-empty { color: @nb_muted; font-size: 12px; }
+.editor-heading { padding: 15px 26px 0 42px; }
+.location-menu > button { font-size: 12px; padding: 4px 6px; }
+.editor, .editor text {
+  background: @nb_editor;
+  color: @nb_text;
+  caret-color: @nb_accent;
+  font-family: "Inter", "Noto Sans", "Cantarell", sans-serif;
+  font-size: 16px;
+  line-height: 1.1;
+}
+.editor text selection { background: @nb_selected; color: @nb_text; }
+.writing-placeholder { color: @nb_faint; font-size: 16px; }
+.footer { padding: 12px 18px; font-size: 11px; color: @nb_faint; }
+.editor-footer { padding: 12px 30px 12px 48px; font-size: 11px; color: @nb_faint; }
+.empty-title { color: @nb_text; font-size: 20px; font-weight: 400; }
+.dim-label { color: @nb_muted; }
+.error-banner { padding: 12px 18px; background: alpha(#d56c64, 0.15); }
+.shortcuts { font-family: monospace; line-height: 2; }
+.notebook-app paned > separator {
+  min-width: 1px;
+  min-height: 1px;
+  margin: 0;
+  padding: 0;
+  background: @nb_line;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+}
+.notebook-app scrollbar { background: transparent; }
+.notebook-app scrollbar slider { min-width: 4px; min-height: 4px; border: none; background: alpha(@nb_muted, 0.25); }
+.notebook-app popover > contents { background: @nb_list; color: @nb_text; border: 1px solid @nb_line; border-radius: 8px; padding: 6px; }
