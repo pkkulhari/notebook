@@ -13,6 +13,7 @@ pub struct Document {
     pub spans: Vec<Span>,
     pub hidden: Vec<Range<i32>>,
     pub blocks: Vec<Range<i32>>,
+    pub list_markers: Vec<Range<i32>>,
     pub links: Vec<(Range<i32>, String)>,
 }
 
@@ -117,6 +118,11 @@ pub fn parse(source: &str) -> Document {
                     range: chars(range.start..first_line_end),
                     style: "list-item-start",
                 });
+                let line_start = source[..range.start].rfind('\n').map_or(0, |i| i + 1);
+                let bullet = text.find(char::is_whitespace).unwrap_or(text.len());
+                let content = text.len() - text[bullet..].trim_start_matches([' ', '\t']).len();
+                doc.list_markers
+                    .push(chars(line_start..range.start + content));
             }
             Event::Start(Tag::CodeBlock(kind)) => {
                 style = Some("code-block");
@@ -152,6 +158,11 @@ pub fn parse(source: &str) -> Document {
             }
             Event::TaskListMarker(checked) => {
                 style = Some(if checked { "checked" } else { "task" });
+                let content = range.end + source[range.end..].len()
+                    - source[range.end..].trim_start_matches([' ', '\t']).len();
+                if let Some(marker) = doc.list_markers.last_mut() {
+                    marker.end = chars(range.start..content).end;
+                }
             }
             _ => {}
         }
@@ -239,6 +250,18 @@ mod tests {
             starts,
             ["- 世界", "- nested", "- [ ] task", "1. ordered", "2. next"]
         );
+    }
+
+    #[test]
+    fn list_markers_cover_indent_bullet_and_task_box() {
+        let source = "- one\n  - [ ] nested task\n10. ten\n";
+        let chars: Vec<char> = source.chars().collect();
+        let markers: Vec<String> = parse(source)
+            .list_markers
+            .iter()
+            .map(|r| chars[r.start as usize..r.end as usize].iter().collect())
+            .collect();
+        assert_eq!(markers, ["- ", "  - [ ] ", "10. "]);
     }
 
     #[test]

@@ -1175,7 +1175,36 @@ impl Ui {
                 &buffer.iter_at_offset(span.range.end),
             );
         }
+        self.apply_hanging_indents();
         self.update_hidden();
+    }
+
+    fn apply_hanging_indents(&self) {
+        let buffer = self.editor.buffer();
+        let tags = buffer.tag_table();
+        for marker in &self.state.borrow().document.list_markers {
+            let start = buffer.iter_at_offset(marker.start);
+            let end = buffer.iter_at_offset(marker.end);
+            let (from, to) = (
+                self.editor.iter_location(&start),
+                self.editor.iter_location(&end),
+            );
+            let width = to.x() - from.x();
+            if width <= 0 || to.y() != from.y() {
+                continue;
+            }
+            let name = format!("hang-{width}");
+            if tags.lookup(&name).is_none() {
+                tags.add(
+                    &gtk::TextTag::builder()
+                        .name(&name)
+                        .left_margin(self.editor.left_margin() + width)
+                        .indent(-width)
+                        .build(),
+                );
+            }
+            buffer.apply_tag_by_name(&name, &start, &end);
+        }
     }
 
     fn update_hidden(&self) {
@@ -1228,6 +1257,14 @@ impl Ui {
                 tag.set_left_margin(margin + inset);
             }
         }
+        tags.foreach(|tag| {
+            if let Some(width) = tag
+                .name()
+                .and_then(|name| name.strip_prefix("hang-")?.parse::<i32>().ok())
+            {
+                tag.set_left_margin(margin + width);
+            }
+        });
     }
 
     fn tick(self: &Rc<Self>) {
@@ -2075,8 +2112,7 @@ mod tests {
         pump_until(|| ui.state.borrow().notebooks.len() == 1);
         assert_eq!(ui.state.borrow().active.as_deref(), Some(second.as_str()));
 
-        let block_sample =
-            "Ordinary paragraph\n\n> A quoted paragraph\n\n```rust\nfn main() {}\n```\n\nEnd";
+        let block_sample = "Ordinary paragraph\n\n> A quoted paragraph\n\n```rust\nfn main() {}\n```\n\n- [ ] Record real robot rollout data and run the same trajectories in the bench X12 actuator at the same frequency, then compare the logged currents\n\nEnd";
         ui.new_note();
         let blocks = ui.state.borrow().active.clone().unwrap();
         ui.editor.buffer().insert_at_cursor(block_sample);
@@ -2179,6 +2215,14 @@ mod tests {
                 "{name} starts at {left}, outside prose column at {prose}"
             );
         }
+        let item = source.find("Record").unwrap();
+        let content = source[..item].chars().count() as i32;
+        let first = ui.editor.iter_location(&buffer.iter_at_offset(content));
+        let wrapped = (content..content + source[item..].find('\n').unwrap() as i32)
+            .map(|offset| ui.editor.iter_location(&buffer.iter_at_offset(offset)))
+            .find(|location| location.y() > first.y())
+            .expect("task item should wrap");
+        assert_eq!(wrapped.x(), first.x(), "wrapped task line is not aligned");
         assert_eq!(
             buffer.text(&buffer.start_iter(), &buffer.end_iter(), true),
             source
