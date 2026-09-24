@@ -44,7 +44,7 @@ cargo deb --locked
 The `.deb` is written to `target/debian/` and includes a desktop application launcher. Install it with:
 
 ```sh
-sudo apt install ./target/debian/notebook_0.1.0-1_amd64.deb
+sudo apt install ./target/debian/notebook_0.2.0-1_amd64.deb
 ```
 
 The filename depends on the package version and build architecture. Runtime dependencies are determined from the build system, so build on the oldest Debian or Ubuntu release you intend to support (with GTK 4.12 or newer).
