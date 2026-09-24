@@ -195,6 +195,58 @@ fn hide_pair(
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ListEnter {
+    Continue { marker: usize, next: String },
+    End,
+}
+
+pub fn list_enter(line: &str) -> Option<ListEnter> {
+    let spaces = |s: &str| s.len() - s.trim_start_matches([' ', '\t']).len();
+    let indent = spaces(line);
+    let rest = &line[indent..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let (bullet, number) = if rest.starts_with(['-', '*', '+']) {
+        (rest[..1].to_string(), None)
+    } else if (1..=9).contains(&digits) && rest[digits..].starts_with(['.', ')']) {
+        let number: u64 = rest[..digits].parse().ok()?;
+        (rest[digits..digits + 1].to_string(), Some(number + 1))
+    } else {
+        return None;
+    };
+    let bullet_len = digits + 1;
+    let gap = spaces(&rest[bullet_len..]);
+    let after = &rest[bullet_len + gap..];
+    if gap == 0 {
+        return None;
+    }
+    let task = ["[ ]", "[x]", "[X]"].iter().any(|b| after.starts_with(b))
+        && (after.len() == 3 || after[3..].starts_with([' ', '\t']));
+    let content = if task {
+        &after[3 + spaces(&after[3..])..]
+    } else {
+        after
+    };
+    if content.trim().is_empty() {
+        return Some(ListEnter::End);
+    }
+    let marker = line.len() - content.len();
+    let mut next = format!("\n{}", &line[..indent]);
+    if let Some(number) = number {
+        next.push_str(&number.to_string());
+    }
+    next.push_str(&bullet);
+    next.push_str(&rest[bullet_len..bullet_len + gap]);
+    if task {
+        next.push_str("[ ]");
+        next.push_str(&after[3..after.len() - content.len()]);
+    }
+    Some(ListEnter::Continue {
+        marker: line[..marker].chars().count(),
+        next,
+    })
+}
+
 pub fn summary(body: &str) -> (String, String) {
     let mut lines = body.lines().filter(|line| !line.trim().is_empty());
     let label = lines
@@ -262,6 +314,32 @@ mod tests {
             .map(|r| chars[r.start as usize..r.end as usize].iter().collect())
             .collect();
         assert_eq!(markers, ["- ", "  - [ ] ", "10. "]);
+    }
+
+    #[test]
+    fn enter_continues_or_ends_lists() {
+        let next = |line| match list_enter(line) {
+            Some(ListEnter::Continue { next, .. }) => Some(next),
+            _ => None,
+        };
+        assert_eq!(next("- item").as_deref(), Some("\n- "));
+        assert_eq!(next("  * nested").as_deref(), Some("\n  * "));
+        assert_eq!(next("- [x] done").as_deref(), Some("\n- [ ] "));
+        assert_eq!(next("9. nine").as_deref(), Some("\n10. "));
+        assert_eq!(next("3) three").as_deref(), Some("\n4) "));
+        assert_eq!(
+            list_enter("- [ ] 世界"),
+            Some(ListEnter::Continue {
+                marker: 6,
+                next: "\n- [ ] ".into()
+            })
+        );
+        for line in ["- ", "1. ", "- [ ] ", "  - [x]"] {
+            assert_eq!(list_enter(line), Some(ListEnter::End), "{line:?}");
+        }
+        for line in ["plain", "-", "-dash", "***", "1.5 kg", "1234567890. x"] {
+            assert_eq!(list_enter(line), None, "{line:?}");
+        }
     }
 
     #[test]

@@ -664,6 +664,22 @@ impl Ui {
             }
         });
         self.editor.add_controller(click);
+        let enter = gtk::EventControllerKey::new();
+        enter.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        enter.connect_key_pressed(move |_, key, _, modifiers| {
+            let plain_enter = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+                && !modifiers.intersects(
+                    gdk::ModifierType::SHIFT_MASK
+                        | gdk::ModifierType::CONTROL_MASK
+                        | gdk::ModifierType::ALT_MASK,
+                );
+            match weak.upgrade() {
+                Some(ui) if plain_enter && ui.continue_list() => glib::Propagation::Stop,
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.editor.add_controller(enter);
         // Preserve Markdown delimiters even when presentation tags hide them.
         self.editor.connect_copy_clipboard(|view| {
             view.stop_signal_emission_by_name("copy-clipboard");
@@ -1179,6 +1195,58 @@ impl Ui {
         self.update_hidden();
     }
 
+    fn continue_list(&self) -> bool {
+        let buffer = self.editor.buffer();
+        if !self.editor.is_editable() || buffer.has_selection() {
+            return false;
+        }
+        let mut cursor = buffer.iter_at_mark(&buffer.get_insert());
+        let in_code = self
+            .state
+            .borrow()
+            .document
+            .spans
+            .iter()
+            .any(|span| span.style == "code-block" && span.range.contains(&cursor.offset()));
+        if in_code {
+            return false;
+        }
+        let mut start = cursor;
+        start.set_line_offset(0);
+        let mut end = cursor;
+        if !end.ends_line() {
+            end.forward_to_line_end();
+        }
+        let line = buffer.text(&start, &end, true);
+        match markdown::list_enter(&line) {
+            Some(markdown::ListEnter::Continue { marker, next })
+                if cursor.line_offset() >= marker as i32 =>
+            {
+                let start = cursor.offset() + 1;
+                buffer.begin_user_action();
+                buffer.insert(&mut cursor, &next);
+                buffer.end_user_action();
+                buffer.apply_tag_by_name("list-item-start", &buffer.iter_at_offset(start), &cursor);
+                if let Some(task) = next.find("[ ]") {
+                    let task = cursor.offset() - next[task..].chars().count() as i32;
+                    buffer.apply_tag_by_name(
+                        "task",
+                        &buffer.iter_at_offset(task),
+                        &buffer.iter_at_offset(task + 3),
+                    );
+                }
+            }
+            Some(markdown::ListEnter::End) => {
+                buffer.begin_user_action();
+                buffer.delete(&mut start, &mut end);
+                buffer.end_user_action();
+            }
+            _ => return false,
+        }
+        self.editor.scroll_mark_onscreen(&buffer.get_insert());
+        true
+    }
+
     fn apply_hanging_indents(&self) {
         let buffer = self.editor.buffer();
         let tags = buffer.tag_table();
@@ -1198,7 +1266,7 @@ impl Ui {
                 tags.add(
                     &gtk::TextTag::builder()
                         .name(&name)
-                        .left_margin(self.editor.left_margin() + width)
+                        .left_margin(self.editor.left_margin())
                         .indent(-width)
                         .build(),
                 );
@@ -1258,11 +1326,8 @@ impl Ui {
             }
         }
         tags.foreach(|tag| {
-            if let Some(width) = tag
-                .name()
-                .and_then(|name| name.strip_prefix("hang-")?.parse::<i32>().ok())
-            {
-                tag.set_left_margin(margin + width);
+            if tag.name().is_some_and(|name| name.starts_with("hang-")) {
+                tag.set_left_margin(margin);
             }
         });
     }
@@ -2129,6 +2194,21 @@ mod tests {
         gtk::prelude::WidgetExt::activate_action(&ui.window, "win.focus", None).unwrap();
         pump_until(|| ui.editor.left_margin() == normal_margin);
         assert_block_alignment(&ui, block_sample);
+
+        ui.new_note();
+        let buffer = ui.editor.buffer();
+        let text = || buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        buffer.insert_at_cursor("- [x] done");
+        pump_until(|| ui.state.borrow().parsed_generation == ui.state.borrow().parse_generation);
+        assert!(ui.continue_list());
+        assert_eq!(text(), "- [x] done\n- [ ] ");
+        let x = |offset| ui.editor.iter_location(&buffer.iter_at_offset(offset)).x();
+        assert_eq!(x(11), x(0), "new item shifts before reparse");
+        assert_eq!(x(17), x(6), "new item text shifts before reparse");
+        assert!(ui.continue_list());
+        assert_eq!(text(), "- [x] done\n");
+        buffer.insert_at_cursor("plain");
+        assert!(!ui.continue_list());
         ui.open_note(&second);
 
         ui.window.close();
@@ -2218,11 +2298,15 @@ mod tests {
         let item = source.find("Record").unwrap();
         let content = source[..item].chars().count() as i32;
         let first = ui.editor.iter_location(&buffer.iter_at_offset(content));
-        let wrapped = (content..content + source[item..].find('\n').unwrap() as i32)
-            .map(|offset| ui.editor.iter_location(&buffer.iter_at_offset(offset)))
-            .find(|location| location.y() > first.y())
-            .expect("task item should wrap");
+        let wrapped = || {
+            (content..content + source[item..].find('\n').unwrap() as i32)
+                .map(|offset| ui.editor.iter_location(&buffer.iter_at_offset(offset)))
+                .find(|location| location.y() > first.y())
+        };
+        pump_until(|| wrapped().is_some());
+        let wrapped = wrapped().unwrap();
         assert_eq!(wrapped.x(), first.x(), "wrapped task line is not aligned");
+        assert_eq!(x("- [ ] Record"), prose, "list item is indented past prose");
         assert_eq!(
             buffer.text(&buffer.start_iter(), &buffer.end_iter(), true),
             source
