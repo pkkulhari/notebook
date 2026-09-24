@@ -28,7 +28,7 @@
   border-bottom: 1px solid @nb_line;
   box-shadow: none;
 }
-.brand { font-size: 12px; font-weight: 600; letter-spacing: 0.3px; }
+.brand { color: @nb_text; font-size: 14px; font-weight: 700; letter-spacing: 0.3px; }
 .sidebar-panel { background: @nb_sidebar; }
 .notes-panel { background: @nb_list; }
 .writing-panel { background: @nb_editor; }
