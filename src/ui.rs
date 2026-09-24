@@ -171,6 +171,10 @@ fn build(app: &gtk::Application, path: std::path::PathBuf) -> Rc<Ui> {
         .child(&sidebar)
         .build();
     sidebar_box.append(&sidebar_scroll);
+    let version = gtk::Label::new(Some(concat!("Notebook v", env!("CARGO_PKG_VERSION"))));
+    version.add_css_class("footer");
+    version.set_xalign(0.0);
+    sidebar_box.append(&version);
     let list_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     list_box.add_css_class("notes-panel");
     let list_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
