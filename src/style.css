@@ -142,3 +142,16 @@ row:focus-within .notebook-options, .notebook-options:focus-within { opacity: 1;
 .notebook-app scrollbar { background: transparent; }
 .notebook-app scrollbar slider { min-width: 4px; min-height: 4px; border: none; background: alpha(@nb_muted, 0.25); }
 .notebook-app popover > contents { background: @nb_list; color: @nb_text; border: 1px solid @nb_line; border-radius: 8px; padding: 6px; }
+.notebook-app button.sync-active { color: @nb_accent; }
+.sync-heading { font-size: 15px; font-weight: 650; }
+.sync-hint { color: @nb_muted; font-size: 12px; }
+.sync-dialog .eyebrow { margin-top: 10px; }
+.sync-device { padding: 6px 0; }
+.sync-device-name { font-weight: 600; }
+.pairing-code {
+  font-family: "Source Code Pro", monospace;
+  font-size: 30px;
+  font-weight: 650;
+  letter-spacing: 4px;
+}
+.sync-problem { color: @error_color; font-size: 12px; }

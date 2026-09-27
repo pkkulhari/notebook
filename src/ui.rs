@@ -1,20 +1,44 @@
 use gtk::{gdk, gio, glib, pango, prelude::*};
+use loro::{ContainerTrait, ExportMode, LoroDoc, LoroText, TextDelta, UndoManager, VersionVector};
 use notebook::{
+    crdt,
     markdown::{self, Document},
     model::*,
     storage::{self, Command, Event, Mutation},
+    sync::{self, Control, Pairing, SyncHandle},
 };
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     time::{Duration, Instant},
 };
+
+/// Typing within this many milliseconds of the last edit undoes together.
+const UNDO_MERGE_MS: i64 = 500;
+const TYPING: &str = "typing";
+
+type TextChanges = Arc<Mutex<Vec<Vec<TextDelta>>>>;
 
 struct Draft {
     note: Note,
     buffer: gtk::TextBuffer,
+    /// The editor's copy of the note. The buffer mirrors its text: typing is
+    /// written into it, and its imports and undos are written into the buffer.
+    doc: LoroDoc,
+    /// Undoes only this device's edits, even after others' edits arrive.
+    undo: UndoManager,
+    /// Text changes from imports and undo, waiting to reach the buffer.
+    incoming: TextChanges,
+    _subscription: loro::Subscription,
+    /// The version storage has confirmed saving, and the versions of saves
+    /// still in flight, by sequence.
+    acked: VersionVector,
+    in_flight: Vec<(u64, VersionVector)>,
     sequence: u64,
     saved: u64,
     queued: u64,
@@ -46,6 +70,32 @@ struct State {
     reveal_active: bool,
 }
 
+impl State {
+    fn leave_missing_notebook(&mut self) {
+        if matches!(&self.filter, Filter::Notebook(id) if !self.notebooks.iter().any(|b| &b.id == id))
+        {
+            self.filter = Filter::Notebook(self.default_notebook_id.clone());
+        }
+    }
+}
+
+struct SyncDialog {
+    window: gtk::Window,
+    /// Set while the widgets are updated from status, so they don't echo back.
+    quiet: Rc<Cell<bool>>,
+    enabled: gtk::Switch,
+    name: gtk::Entry,
+    devices: gtk::Box,
+    pairing: gtk::Stack,
+    pairing_box: gtk::Box,
+    pairing_note: gtk::Label,
+    code: gtk::Label,
+    relay: gtk::Entry,
+    problem: gtk::Label,
+    /// The ID, name, and state shown for each paired device.
+    rows: RefCell<Vec<[String; 3]>>,
+}
+
 pub(crate) struct Ui {
     window: gtk::ApplicationWindow,
     outer: gtk::Paned,
@@ -75,7 +125,15 @@ pub(crate) struct Ui {
     parse_requests: Sender<(u64, String)>,
     parse_results: Receiver<(u64, Document)>,
     state: RefCell<State>,
+    sync: SyncHandle,
+    sync_status: RefCell<sync::Status>,
+    sync_button: gtk::Button,
+    sync_dialog: RefCell<Option<SyncDialog>>,
     updating: Cell<bool>,
+    /// This window's writer identity in every note it edits.
+    peer: u64,
+    /// The buffer is being changed from its document, not by typing.
+    from_doc: Cell<bool>,
     allow_close: Cell<bool>,
     search_due: Cell<Option<Instant>>,
     prefs_due: Cell<Instant>,
@@ -83,11 +141,22 @@ pub(crate) struct Ui {
 }
 
 pub(crate) fn launch(app: &gtk::Application) -> Rc<Ui> {
-    build(app, storage::data_path())
+    build(
+        app,
+        storage::data_path(),
+        sync::config_path(),
+        sync::Options::default(),
+    )
 }
 
-fn build(app: &gtk::Application, path: std::path::PathBuf) -> Rc<Ui> {
-    let (commands, events) = storage::spawn_worker(path);
+fn build(
+    app: &gtk::Application,
+    path: std::path::PathBuf,
+    sync_config: std::path::PathBuf,
+    sync_options: sync::Options,
+) -> Rc<Ui> {
+    let (commands, events) = storage::spawn_worker(path.clone());
+    let sync = sync::spawn(sync_config, path, commands.clone(), sync_options);
     let (parse_requests, incoming) = mpsc::channel::<(u64, String)>();
     let (outgoing, parse_results) = mpsc::channel();
     std::thread::Builder::new()
@@ -130,6 +199,7 @@ fn build(app: &gtk::Application, path: std::path::PathBuf) -> Rc<Ui> {
     menu.append(Some("New note"), Some("win.new-note"));
     menu.append(Some("Search notes"), Some("win.search"));
     menu.append(Some("Focus writing"), Some("win.focus"));
+    menu.append(Some("Sync devices"), Some("win.sync"));
     menu.append(Some("Keyboard shortcuts"), Some("win.shortcuts"));
     let menu_button = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
@@ -138,6 +208,12 @@ fn build(app: &gtk::Application, path: std::path::PathBuf) -> Rc<Ui> {
         .build();
     menu_button.add_css_class("quiet-menu");
     header.pack_end(&menu_button);
+    let sync_button = icon_button(
+        "emblem-synchronizing-symbolic",
+        "Sync with your other devices",
+    );
+    sync_button.set_action_name(Some("win.sync"));
+    header.pack_end(&sync_button);
     window.set_titlebar(Some(&header));
 
     let sidebar_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -423,9 +499,15 @@ fn build(app: &gtk::Application, path: std::path::PathBuf) -> Rc<Ui> {
         retry,
         commands,
         events,
+        sync,
+        sync_status: RefCell::new(sync::Status::default()),
+        sync_button,
+        sync_dialog: RefCell::new(None),
         parse_requests,
         parse_results,
         updating: Cell::new(false),
+        peer: crdt::random_peer(),
+        from_doc: Cell::new(false),
         allow_close: Cell::new(false),
         search_due: Cell::new(None),
         prefs_due: Cell::new(Instant::now()),
@@ -522,19 +604,10 @@ impl Ui {
                 ui.send(Command::Mutate(Mutation::DeleteNotebook { id }));
             }
         });
-        self.action("undo", |ui| {
-            let buffer = ui.editor.buffer();
-            if ui.editor.is_editable() && buffer.can_undo() {
-                buffer.undo();
-            }
-        });
-        self.action("redo", |ui| {
-            let buffer = ui.editor.buffer();
-            if ui.editor.is_editable() && buffer.can_redo() {
-                buffer.redo();
-            }
-        });
+        self.action("undo", |ui| ui.undo_redo(true));
+        self.action("redo", |ui| ui.undo_redo(false));
         self.action("save", |ui| ui.flush_drafts());
+        self.action("sync", |ui| ui.show_sync_dialog());
         self.action("shortcuts", |ui| {
             let dialog = gtk::Window::builder().title("Keyboard shortcuts").transient_for(&ui.window).modal(true).default_width(420).build();
             let label = gtk::Label::new(Some("New note                 Ctrl+N\nSearch all notes         Ctrl+F\nFocus writing            F9\nSave now                 Ctrl+S\nUndo                     Ctrl+Z\nRedo                     Ctrl+Shift+Z\nTrash / restore          Ctrl+Shift+Delete\nOpen link                Ctrl+click\nReturn to writing        Escape"));
@@ -710,16 +783,12 @@ impl Ui {
                 let failed = std::mem::take(&mut ui.state.borrow_mut().failed);
                 ui.error_box.set_visible(false);
                 for command in failed {
-                    if let Command::Save { id, .. } = command {
-                        // Retrying an old snapshot could overwrite a more recent save.
+                    if let Command::Edit { id, .. } = command {
+                        // Resend everything since the last confirmed save, which
+                        // includes the failed edits and any made after them.
                         let mut s = ui.state.borrow_mut();
                         if let Some(d) = s.drafts.get_mut(&id) {
-                            ui.send(Command::Save {
-                                id,
-                                body: d.note.body.clone(),
-                                sequence: d.sequence,
-                            });
-                            d.queued = d.sequence;
+                            ui.send(edit_command(&id, d));
                         }
                     } else {
                         ui.send(command);
@@ -954,40 +1023,58 @@ impl Ui {
         self.location.set_popover(Some(&popover));
     }
 
-    fn install_draft(self: &Rc<Self>, note: Note, created: bool) {
+    /// A new note passes an empty `snapshot`.
+    fn install_draft(self: &Rc<Self>, mut note: Note, created: bool, snapshot: &[u8]) {
+        let doc = LoroDoc::from_snapshot(snapshot).unwrap_or_else(|_| LoroDoc::new());
+        // Set before any edit and before the undo manager binds to the peer.
+        let _ = doc.set_peer_id(self.peer);
+        let text = crdt::text(&doc);
+        note.body = text.to_string();
+        let mut undo = UndoManager::new(&doc);
+        undo.set_max_undo_steps(500);
+        undo.set_merge_interval(UNDO_MERGE_MS);
+        let incoming = TextChanges::default();
+        let queue = incoming.clone();
+        let subscription = doc.subscribe(
+            &text.id(),
+            Arc::new(move |event| {
+                // The buffer already shows what was typed into it.
+                if event.origin == TYPING {
+                    return;
+                }
+                let mut queue = queue.lock().unwrap();
+                for diff in event.events {
+                    if let loro::event::Diff::Text(delta) = diff.diff {
+                        queue.push(delta);
+                    }
+                }
+            }),
+        );
         let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
         configure_tags(&buffer);
         buffer.set_text(&note.body);
-        buffer.set_enable_undo(true);
-        buffer.set_max_undo_levels(500);
-        let id = note.id.clone();
-        let weak = Rc::downgrade(self);
+        buffer.set_enable_undo(false);
+        let (weak, id) = (Rc::downgrade(self), note.id.clone());
+        buffer.connect_insert_text(move |_, at, inserted| {
+            if let Some(ui) = weak.upgrade() {
+                ui.mirror_typing(&id, |text| text.insert(at.offset() as usize, inserted));
+            }
+        });
+        let (weak, id) = (Rc::downgrade(self), note.id.clone());
+        buffer.connect_delete_range(move |_, start, end| {
+            let (start, end) = (start.offset() as usize, end.offset() as usize);
+            if end > start
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.mirror_typing(&id, |text| text.delete(start, end - start));
+            }
+        });
+        let (weak, id) = (Rc::downgrade(self), note.id.clone());
         buffer.connect_changed(move |buffer| {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let mut s = ui.state.borrow_mut();
-            let Some(draft) = s.drafts.get_mut(&id) else {
-                return;
-            };
-            draft.note.body = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .to_string();
-            draft.sequence += 1;
-            draft.changed = Instant::now();
-            let empty = draft.note.body.is_empty();
-            if s.active.as_deref() == Some(&id) {
-                ui.placeholder.set_visible(empty);
-                s.parse_generation += 1;
-                s.parse_due = Some(Instant::now() + Duration::from_millis(80));
-                s.document = Document::default();
-                // Tags elsewhere track edits automatically. Reveal only the edited line
-                // while a new parse is pending, avoiding whole-document flicker.
-                let mut start = buffer.iter_at_offset(buffer.cursor_position());
-                start.set_line_offset(0);
-                let mut end = start;
-                end.forward_to_line_end();
-                buffer.remove_tag_by_name("hidden", &start, &end);
+            if let Some(ui) = weak.upgrade()
+                && !ui.from_doc.get()
+            {
+                ui.text_changed(&id, buffer);
             }
         });
         let weak = Rc::downgrade(self);
@@ -1005,6 +1092,12 @@ impl Ui {
             Draft {
                 note,
                 buffer,
+                acked: doc.oplog_vv(),
+                in_flight: vec![],
+                doc,
+                undo,
+                incoming,
+                _subscription: subscription,
                 sequence: 0,
                 saved: 0,
                 queued: 0,
@@ -1073,14 +1166,24 @@ impl Ui {
 
     fn trim_cache(&self) {
         let mut s = self.state.borrow_mut();
+        let excess = s.drafts.len().saturating_sub(12);
+        if excess == 0 {
+            return;
+        }
         let mut candidates: Vec<_> = s
             .drafts
             .iter()
-            .filter(|(id, d)| s.active.as_ref() != Some(id) && d.created && d.sequence == d.saved)
+            .filter(|(id, d)| {
+                s.active.as_ref() != Some(id)
+                    && d.created
+                    && d.sequence == d.saved
+                    // Reopening reuses this window's writer identity, so every
+                    // edit it made must already be saved.
+                    && d.doc.oplog_vv().get(&self.peer) == d.acked.get(&self.peer)
+            })
             .map(|(id, d)| (d.last_opened, id.clone()))
             .collect();
         candidates.sort();
-        let excess = s.drafts.len().saturating_sub(12);
         for (_, id) in candidates.into_iter().take(excess) {
             s.drafts.remove(&id);
         }
@@ -1117,7 +1220,7 @@ impl Ui {
         }
         self.search.set_text("");
         self.rebuild_sidebar();
-        self.install_draft(note.clone(), false);
+        self.install_draft(note.clone(), false, &[]);
         self.display_note(&id, Some(0));
         self.send(Command::Create(note));
         self.request_list();
@@ -1143,14 +1246,119 @@ impl Ui {
         let mut s = self.state.borrow_mut();
         for (id, draft) in &mut s.drafts {
             if draft.sequence > draft.queued {
-                self.send(Command::Save {
-                    id: id.clone(),
-                    body: draft.note.body.clone(),
-                    sequence: draft.sequence,
-                });
-                draft.queued = draft.sequence;
-                draft.last_queued = Instant::now();
+                self.send(edit_command(id, draft));
             }
+        }
+    }
+
+    /// Runs before GTK applies the edit, while the offsets still describe the
+    /// text both sides share.
+    fn mirror_typing(&self, id: &str, edit: impl FnOnce(&LoroText) -> loro::LoroResult<()>) {
+        if self.from_doc.get() {
+            return;
+        }
+        let mut s = self.state.borrow_mut();
+        let Some(d) = s.drafts.get_mut(id) else {
+            return;
+        };
+        if edit(&crdt::text(&d.doc)).is_ok() {
+            d.doc.set_next_commit_origin(TYPING);
+            d.doc.commit();
+            d.sequence += 1;
+            d.changed = Instant::now();
+        }
+    }
+
+    fn text_changed(&self, id: &str, buffer: &gtk::TextBuffer) {
+        let mut s = self.state.borrow_mut();
+        let Some(draft) = s.drafts.get_mut(id) else {
+            return;
+        };
+        draft.note.body = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), true)
+            .to_string();
+        let empty = draft.note.body.is_empty();
+        if s.active.as_deref() == Some(id) {
+            self.placeholder.set_visible(empty);
+            s.parse_generation += 1;
+            s.parse_due = Some(Instant::now() + Duration::from_millis(80));
+            s.document = Document::default();
+            // Tags elsewhere track edits automatically. Reveal only the edited line
+            // while a new parse is pending, avoiding whole-document flicker.
+            let mut start = buffer.iter_at_offset(buffer.cursor_position());
+            start.set_line_offset(0);
+            let mut end = start;
+            end.forward_to_line_end();
+            buffer.remove_tag_by_name("hidden", &start, &end);
+        }
+    }
+
+    /// Writes changes queued by a document import or undo into its buffer.
+    /// Returns the offset just after the last change.
+    fn apply_incoming(
+        &self,
+        id: &str,
+        buffer: &gtk::TextBuffer,
+        incoming: &TextChanges,
+    ) -> Option<i32> {
+        let deltas = std::mem::take(&mut *incoming.lock().unwrap());
+        if deltas.is_empty() {
+            return None;
+        }
+        self.from_doc.set(true);
+        let mut last = None;
+        for delta in deltas {
+            let mut offset = 0;
+            for item in delta {
+                match item {
+                    TextDelta::Retain { retain, .. } => offset += retain as i32,
+                    TextDelta::Insert { insert, .. } => {
+                        buffer.insert(&mut buffer.iter_at_offset(offset), &insert);
+                        offset += insert.chars().count() as i32;
+                        last = Some(offset);
+                    }
+                    TextDelta::Delete { delete } => {
+                        buffer.delete(
+                            &mut buffer.iter_at_offset(offset),
+                            &mut buffer.iter_at_offset(offset + delete as i32),
+                        );
+                        last = Some(offset);
+                    }
+                }
+            }
+        }
+        self.from_doc.set(false);
+        self.text_changed(id, buffer);
+        last
+    }
+
+    fn undo_redo(&self, undo: bool) {
+        if !self.editor.is_editable() {
+            return;
+        }
+        let target = {
+            let mut s = self.state.borrow_mut();
+            let Some(id) = s.active.clone() else {
+                return;
+            };
+            let Some(d) = s.drafts.get_mut(&id) else {
+                return;
+            };
+            let done = if undo { d.undo.undo() } else { d.undo.redo() };
+            if !done.unwrap_or(false) {
+                return;
+            }
+            // Undo can record edits that leave the text as it was; they still
+            // need saving.
+            d.sequence += 1;
+            d.changed = Instant::now();
+            Some((id, d.buffer.clone(), d.incoming.clone()))
+        };
+        if let Some((id, buffer, incoming)) = target
+            && let Some(offset) = self.apply_incoming(&id, &buffer, &incoming)
+        {
+            buffer.place_cursor(&buffer.iter_at_offset(offset));
+            self.editor.scroll_mark_onscreen(&buffer.get_insert());
         }
     }
 
@@ -1343,6 +1551,11 @@ impl Ui {
         while let Ok(event) = self.events.try_recv() {
             self.handle(event);
         }
+        if let Some(status) = self.sync.status() {
+            *self.sync_status.borrow_mut() = status;
+            self.update_sync_button();
+            self.update_sync_dialog();
+        }
         while let Ok((generation, document)) = self.parse_results.try_recv() {
             if generation == self.state.borrow().parse_generation {
                 {
@@ -1376,13 +1589,7 @@ impl Ui {
                     && (now.duration_since(d.changed) >= Duration::from_millis(300)
                         || now.duration_since(d.last_queued) >= Duration::from_secs(2))
                 {
-                    self.send(Command::Save {
-                        id: id.clone(),
-                        body: d.note.body.clone(),
-                        sequence: d.sequence,
-                    });
-                    d.queued = d.sequence;
-                    d.last_queued = now;
+                    self.send(edit_command(id, d));
                 }
             }
             if s.parse_due.is_some_and(|due| due <= now) {
@@ -1406,6 +1613,7 @@ impl Ui {
                 default_notebook_id,
                 notebooks,
                 note,
+                snapshot,
                 preferences,
             } => {
                 let id = note.id.clone();
@@ -1424,7 +1632,7 @@ impl Ui {
                     .set_position(preferences.sidebar_width.clamp(160, 400));
                 self.inner
                     .set_position(preferences.list_width.clamp(220, 600));
-                self.install_draft(note, true);
+                self.install_draft(note, true, &snapshot);
                 self.rebuild_sidebar();
                 self.display_note(&id, Some(preferences.cursor));
                 self.request_list();
@@ -1535,13 +1743,17 @@ impl Ui {
                     }
                 }
             }
-            Event::Loaded { note, generation } => {
+            Event::Loaded {
+                note,
+                snapshot,
+                generation,
+            } => {
                 if generation != self.state.borrow().load_generation {
                     return;
                 }
                 if let Some(note) = note {
                     let id = note.id.clone();
-                    self.install_draft(note, true);
+                    self.install_draft(note, true, &snapshot);
                     self.display_note(&id, None);
                 }
             }
@@ -1557,8 +1769,13 @@ impl Ui {
                     let mut s = self.state.borrow_mut();
                     if let Some(d) = s.drafts.get_mut(&id) {
                         d.saved = d.saved.max(sequence);
+                        if let Some(done) = d.in_flight.iter().position(|(seq, _)| *seq == sequence)
+                        {
+                            d.acked = d.in_flight[done].1.clone();
+                            d.in_flight.drain(..=done);
+                        }
                     }
-                    s.failed.retain(|c| !matches!(c, Command::Save { id: failed_id, sequence: failed_seq, .. } if failed_id == &id && *failed_seq <= sequence));
+                    s.failed.retain(|c| !matches!(c, Command::Edit { id: failed_id, sequence: failed_seq, .. } if failed_id == &id && *failed_seq <= sequence));
                     if s.failed.is_empty() {
                         self.error_box.set_visible(false);
                     }
@@ -1601,12 +1818,10 @@ impl Ui {
                                     d.note.notebook_id = default_id.clone();
                                 }
                             }
-                            if s.filter == Filter::Notebook(id) {
-                                s.filter = Filter::Notebook(default_id);
-                            }
                         }
                         _ => {}
                     }
+                    s.leave_missing_notebook();
                     if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
                         self.editor.set_editable(!d.note.deleted);
                     }
@@ -1614,6 +1829,55 @@ impl Ui {
                 self.rebuild_sidebar();
                 self.request_list();
                 self.update_word_count();
+            }
+            Event::NoteDelta { id, delta } => {
+                let target = self
+                    .state
+                    .borrow()
+                    .drafts
+                    .get(&id)
+                    .map(|d| (d.doc.clone(), d.buffer.clone(), d.incoming.clone()));
+                if let Some((doc, buffer, incoming)) = target {
+                    if doc.import(&delta).is_err() {
+                        incoming.lock().unwrap().clear();
+                    } else if self.apply_incoming(&id, &buffer, &incoming).is_some()
+                        && self.state.borrow().active.as_deref() == Some(&id)
+                    {
+                        self.update_word_count();
+                    }
+                }
+            }
+            Event::Remote { notes, notebooks } => {
+                let books_changed = notebooks.is_some();
+                {
+                    let mut s = self.state.borrow_mut();
+                    if let Some(notebooks) = notebooks {
+                        s.notebooks = notebooks;
+                        s.leave_missing_notebook();
+                    }
+                    for note in notes {
+                        let trashed_here = s.active.as_ref() == Some(&note.id)
+                            && s.filter != Filter::Trash
+                            && note.deleted;
+                        if let Some(d) = s.drafts.get_mut(&note.id) {
+                            let was_deleted = d.note.deleted;
+                            d.note.notebook_id = note.notebook_id;
+                            d.note.deleted = note.deleted;
+                            if trashed_here && !was_deleted {
+                                s.select_first = true;
+                                s.load_generation += 1;
+                            }
+                        }
+                    }
+                    if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
+                        self.editor.set_editable(!d.note.deleted);
+                    }
+                }
+                if books_changed {
+                    self.rebuild_sidebar();
+                }
+                self.update_location();
+                self.request_list();
             }
             Event::Flushed => {
                 if self.state.borrow().closing && self.state.borrow().failed.is_empty() {
@@ -1627,7 +1891,7 @@ impl Ui {
                 s.closing = false;
                 if matches!(
                     command,
-                    Command::Save { .. }
+                    Command::Edit { .. }
                         | Command::Create(_)
                         | Command::Initialize
                         | Command::Preferences(_)
@@ -1735,6 +1999,318 @@ impl Ui {
         dialog.present();
         entry.grab_focus();
     }
+
+    fn update_sync_button(&self) {
+        let status = self.sync_status.borrow();
+        let connected: Vec<&str> = status
+            .devices
+            .iter()
+            .filter(|d| d.connected)
+            .map(|d| d.name.as_str())
+            .collect();
+        let tooltip = if let Some(problem) = &status.problem {
+            problem.clone()
+        } else if !status.enabled {
+            "Sync with your other devices".into()
+        } else {
+            match connected.as_slice() {
+                [] => "Sync is on. No devices are connected".into(),
+                [one] => format!("Syncing with {one}"),
+                many => format!("Syncing with {} devices", many.len()),
+            }
+        };
+        self.sync_button.set_tooltip_text(Some(&tooltip));
+        if connected.is_empty() {
+            self.sync_button.remove_css_class("sync-active");
+        } else {
+            self.sync_button.add_css_class("sync-active");
+        }
+    }
+
+    fn show_sync_dialog(self: &Rc<Self>) {
+        if let Some(dialog) = self.sync_dialog.borrow().as_ref() {
+            dialog.window.present();
+            return;
+        }
+        let window = gtk::Window::builder()
+            .title("Sync")
+            .transient_for(&self.window)
+            .modal(true)
+            .default_width(420)
+            .build();
+        window.add_css_class("notebook-app");
+        window.add_css_class("sync-dialog");
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        content.set_margin_top(24);
+        content.set_margin_bottom(24);
+        content.set_margin_start(24);
+        content.set_margin_end(24);
+        content.set_size_request(372, -1);
+        let quiet = Rc::new(Cell::new(false));
+        let label = wrapped_label;
+
+        let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let intro = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        intro.set_hexpand(true);
+        intro.append(&label("Sync with your other devices", "sync-heading"));
+        intro.append(&label(
+            "Notes travel directly between your paired devices, encrypted. Nothing leaves this network unless you add a relay.",
+            "sync-hint",
+        ));
+        heading.append(&intro);
+        let enabled = gtk::Switch::new();
+        enabled.set_valign(gtk::Align::Center);
+        heading.append(&enabled);
+        content.append(&heading);
+
+        content.append(&label("This device", "eyebrow"));
+        let name = gtk::Entry::builder()
+            .placeholder_text("Device name")
+            .max_length(60)
+            .build();
+        content.append(&name);
+
+        content.append(&label("Paired devices", "eyebrow"));
+        let devices = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        content.append(&devices);
+
+        content.append(&label("Pair a device", "eyebrow"));
+        let pairing = gtk::Stack::new();
+        pairing.set_vhomogeneous(false);
+        let pairing_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let pairing_note = label("", "sync-hint");
+        pairing_box.append(&pairing_note);
+        let show_code = gtk::Button::with_label("Show a pairing code");
+        pairing_box.append(&show_code);
+        let join_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let join = gtk::Entry::builder()
+            .placeholder_text("Code shown on the other device")
+            .max_length(7)
+            .input_purpose(gtk::InputPurpose::Digits)
+            .hexpand(true)
+            .build();
+        let pair = gtk::Button::with_label("Pair");
+        pair.add_css_class("suggested-action");
+        join_row.append(&join);
+        join_row.append(&pair);
+        pairing_box.append(&join_row);
+        pairing.add_named(&pairing_box, Some("idle"));
+        let showing = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        let code = label("", "pairing-code");
+        code.set_selectable(true);
+        showing.append(&code);
+        showing.append(&label(
+            "Enter this code on your other device. It expires in five minutes.",
+            "sync-hint",
+        ));
+        let cancel_code = gtk::Button::with_label("Cancel");
+        showing.append(&cancel_code);
+        pairing.add_named(&showing, Some("showing"));
+        let searching = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let spinner = gtk::Spinner::new();
+        spinner.start();
+        searching.append(&spinner);
+        let looking = label("Looking for your other device…", "sync-hint");
+        looking.set_hexpand(true);
+        searching.append(&looking);
+        let cancel_search = gtk::Button::with_label("Cancel");
+        searching.append(&cancel_search);
+        pairing.add_named(&searching, Some("searching"));
+        content.append(&pairing);
+
+        let internet = gtk::Expander::new(Some("Sync over the internet"));
+        let relay_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        relay_box.set_margin_top(8);
+        relay_box.append(&label(
+            "Devices on different networks can meet through a relay server you run, such as iroh-relay. Enter the same address on each device. Notes stay end-to-end encrypted.",
+            "sync-hint",
+        ));
+        let relay_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let relay = gtk::Entry::builder()
+            .placeholder_text("https://relay.example.com")
+            .hexpand(true)
+            .build();
+        let apply = gtk::Button::with_label("Apply");
+        relay_row.append(&relay);
+        relay_row.append(&apply);
+        relay_box.append(&relay_row);
+        internet.set_child(Some(&relay_box));
+        content.append(&internet);
+
+        let problem = label("", "sync-problem");
+        content.append(&problem);
+        window.set_child(Some(&content));
+
+        let weak = Rc::downgrade(self);
+        let q = quiet.clone();
+        enabled.connect_active_notify(move |switch| {
+            if let Some(ui) = weak.upgrade()
+                && !q.get()
+            {
+                ui.sync.send(Control::SetEnabled(switch.is_active()));
+            }
+        });
+        let weak = Rc::downgrade(self);
+        name.connect_activate(move |entry| {
+            if let Some(ui) = weak.upgrade() {
+                ui.sync
+                    .send(Control::SetDeviceName(entry.text().to_string()));
+            }
+        });
+        self.send_on_click(&show_code, Control::StartPairing);
+        let weak = Rc::downgrade(self);
+        let entry = join.clone();
+        pair.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.sync.send(Control::JoinPairing(entry.text().to_string()));
+                entry.set_text("");
+            }
+        });
+        let pair = pair.downgrade();
+        join.connect_activate(move |_| {
+            if let Some(pair) = pair.upgrade() {
+                pair.emit_clicked();
+            }
+        });
+        for cancel in [&cancel_code, &cancel_search] {
+            self.send_on_click(cancel, Control::CancelPairing);
+        }
+        let weak = Rc::downgrade(self);
+        let entry = relay.clone();
+        apply.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                let url = entry.text().trim().to_string();
+                ui.sync
+                    .send(Control::SetRelay((!url.is_empty()).then_some(url)));
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let entry = name.clone();
+        window.connect_close_request(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.sync
+                    .send(Control::SetDeviceName(entry.text().to_string()));
+                ui.sync_dialog.borrow_mut().take();
+                ui.window.present();
+                ui.editor.grab_focus();
+            }
+            glib::Propagation::Proceed
+        });
+        *self.sync_dialog.borrow_mut() = Some(SyncDialog {
+            window: window.clone(),
+            quiet,
+            enabled,
+            name,
+            devices,
+            pairing,
+            pairing_box,
+            pairing_note,
+            code,
+            relay,
+            problem,
+            rows: RefCell::default(),
+        });
+        self.update_sync_dialog();
+        window.present();
+    }
+
+    fn send_on_click(self: &Rc<Self>, button: &gtk::Button, control: Control) {
+        let weak = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.sync.send(control.clone());
+            }
+        });
+    }
+
+    fn update_sync_dialog(self: &Rc<Self>) {
+        let dialog = self.sync_dialog.borrow();
+        let Some(d) = dialog.as_ref() else {
+            return;
+        };
+        let status = self.sync_status.borrow();
+        d.quiet.set(true);
+        d.enabled.set_active(status.enabled);
+        if !d.name.has_focus() {
+            d.name.set_text(&status.device_name);
+        }
+        if !d.relay.has_focus() {
+            d.relay
+                .set_text(status.relay_url.as_deref().unwrap_or_default());
+        }
+        let rows: Vec<[String; 3]> = status
+            .devices
+            .iter()
+            .map(|device| {
+                let state = if device.connected {
+                    "Connected".to_string()
+                } else if let Some(at) = device.last_synced
+                    && let (Ok(date), Ok(now)) = (
+                        glib::DateTime::from_unix_local(at / 1000),
+                        glib::DateTime::now_local(),
+                    )
+                {
+                    format!("Not connected. Last synced: {}", note_date(&date, &now))
+                } else {
+                    "Not connected".to_string()
+                };
+                [device.id.clone(), device.name.clone(), state]
+            })
+            .collect();
+        // Status changes with every sync; rebuilding unchanged rows would
+        // only lose focus on their buttons.
+        if *d.rows.borrow() != rows {
+            while let Some(child) = d.devices.first_child() {
+                d.devices.remove(&child);
+            }
+            if rows.is_empty() {
+                d.devices
+                    .append(&wrapped_label("No paired devices yet.", "sync-hint"));
+            }
+            for [id, device, state] in &rows {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+                row.add_css_class("sync-device");
+                let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                text.set_hexpand(true);
+                let name = gtk::Label::new(Some(device));
+                name.set_xalign(0.0);
+                name.set_ellipsize(pango::EllipsizeMode::End);
+                name.add_css_class("sync-device-name");
+                text.append(&name);
+                text.append(&wrapped_label(state, "sync-hint"));
+                row.append(&text);
+                let remove = gtk::Button::with_label("Remove");
+                remove.add_css_class("flat");
+                remove.set_valign(gtk::Align::Center);
+                remove.set_tooltip_text(Some("Stop syncing with this device"));
+                self.send_on_click(&remove, Control::Forget(id.clone()));
+                row.append(&remove);
+                d.devices.append(&row);
+            }
+            *d.rows.borrow_mut() = rows;
+        }
+        match &status.pairing {
+            Pairing::Showing(code) => {
+                d.code.set_text(code);
+                d.pairing.set_visible_child_name("showing");
+            }
+            Pairing::Searching => d.pairing.set_visible_child_name("searching"),
+            other => {
+                d.pairing_note.set_text(&match other {
+                    Pairing::Paired(name) => format!("Paired with {name}."),
+                    Pairing::Failed(message) => format!("{message}."),
+                    _ => "Turn on sync on both devices. They must be on the same network to pair."
+                        .into(),
+                });
+                d.pairing.set_visible_child_name("idle");
+            }
+        }
+        d.pairing_box.set_sensitive(status.running());
+        d.problem
+            .set_text(status.problem.as_deref().unwrap_or_default());
+        d.problem.set_visible(status.problem.is_some());
+        d.quiet.set(false);
+    }
 }
 
 fn note_date(date: &glib::DateTime, now: &glib::DateTime) -> String {
@@ -1805,9 +2381,35 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button
 }
 
+fn wrapped_label(text: &str, class: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    // Wrap to the window instead of widening it.
+    label.set_max_width_chars(1);
+    label.add_css_class(class);
+    label
+}
+
+/// Saves every edit the draft has made since storage last confirmed a save.
+fn edit_command(id: &str, d: &mut Draft) -> Command {
+    let updates = d
+        .doc
+        .export(ExportMode::updates(&d.acked))
+        .unwrap_or_default();
+    d.in_flight.push((d.sequence, d.doc.oplog_vv()));
+    d.queued = d.sequence;
+    d.last_queued = Instant::now();
+    Command::Edit {
+        id: id.into(),
+        updates: vec![updates],
+        sequence: d.sequence,
+    }
+}
+
 fn failure_key(command: &Command) -> String {
     match command {
-        Command::Save { id, .. } => format!("save:{id}"),
+        Command::Edit { id, .. } => format!("save:{id}"),
         Command::Create(note) => format!("create:{}", note.id),
         Command::Initialize => "initialize".into(),
         Command::Preferences(_) => "preferences".into(),
@@ -1924,6 +2526,19 @@ mod tests {
         );
     }
 
+    fn test_ui(app: &gtk::Application, path: std::path::PathBuf) -> Rc<Ui> {
+        let config = path.with_extension("sync.json");
+        build(
+            app,
+            path,
+            config,
+            sync::Options {
+                mdns: false,
+                ..Default::default()
+            },
+        )
+    }
+
     fn pump_until(mut predicate: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(8);
         let context = glib::MainContext::default();
@@ -1953,7 +2568,7 @@ mod tests {
         app.register(None::<&gio::Cancellable>).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.db");
-        let ui = build(&app, path.clone());
+        let ui = test_ui(&app, path.clone());
         pump_until(|| ui.state.borrow().ready && ui.editor.has_focus());
         assert!(ui.placeholder.is_visible());
         let first = ui.state.borrow().active.clone().unwrap();
@@ -2022,21 +2637,69 @@ mod tests {
                 .contains("**A thought**")
         );
         buffer.place_cursor(&buffer.end_iter());
+        // Typing after a pause starts a new undo step.
+        let wait = Instant::now() + Duration::from_millis(UNDO_MERGE_MS as u64 + 50);
+        pump_until(|| Instant::now() >= wait);
         buffer.begin_user_action();
         buffer.insert_at_cursor("!");
         buffer.end_user_action();
-        buffer.undo();
-        assert!(
-            buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .ends_with("Last line")
-        );
-        buffer.redo();
-        assert!(
-            buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), true)
-                .ends_with("Last line!")
-        );
+        let text = || buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        gtk::prelude::WidgetExt::activate_action(&ui.window, "win.undo", None).unwrap();
+        assert!(text().ends_with("Last line"));
+        gtk::prelude::WidgetExt::activate_action(&ui.window, "win.redo", None).unwrap();
+        assert!(text().ends_with("Last line!"));
+
+        // Another device edits the open note: the text arrives in place, the
+        // cursor stays put, and undo leaves the other device's edit alone.
+        pump_until(|| {
+            let s = ui.state.borrow();
+            s.drafts[&first].saved == s.drafts[&first].sequence
+        });
+        let reader = storage::open_reader(&path).unwrap();
+        let mut other = storage::Repository::open(&dir.path().join("other.db")).unwrap();
+        let shared = storage::export_since(&reader, &first, None)
+            .unwrap()
+            .unwrap();
+        other.apply_remote(&[shared], "this").unwrap();
+        let version = other.versions(&[crdt::bucket(&first)]).unwrap();
+        let body = other.load(&first).unwrap().unwrap().body;
+        other
+            .save(&first, &format!("> From the laptop\n{body}"))
+            .unwrap();
+        let from_laptop = other
+            .export_since(
+                &first,
+                Some(&version.iter().find(|v| v.id == first).unwrap().version),
+            )
+            .unwrap()
+            .unwrap();
+        let wait = Instant::now() + Duration::from_millis(UNDO_MERGE_MS as u64 + 50);
+        pump_until(|| Instant::now() >= wait);
+        buffer.insert_at_cursor(" Local");
+        let cursor = buffer.cursor_position();
+        ui.send(Command::Remote {
+            docs: vec![from_laptop],
+            from: "laptop".into(),
+        });
+        pump_until(|| text().starts_with("> From the laptop\n"));
+        assert!(text().ends_with("Last line! Local"));
+        let arrived = "> From the laptop\n".chars().count() as i32;
+        assert_eq!(buffer.cursor_position(), cursor + arrived);
+        gtk::prelude::WidgetExt::activate_action(&ui.window, "win.undo", None).unwrap();
+        assert!(text().starts_with("> From the laptop\n"));
+        assert!(text().ends_with("Last line!"));
+        gtk::prelude::WidgetExt::activate_action(&ui.window, "win.redo", None).unwrap();
+        pump_until(|| {
+            let s = ui.state.borrow();
+            s.drafts[&first].saved == s.drafts[&first].sequence
+        });
+        let merged = storage::Repository::open(&path)
+            .unwrap()
+            .load(&first)
+            .unwrap()
+            .unwrap();
+        assert!(merged.body.starts_with("> From the laptop\n# Hello 🌿"));
+        assert!(merged.body.ends_with("Last line! Local"));
 
         ui.send(Command::Mutate(Mutation::CreateNotebook {
             id: "work".into(),
@@ -2223,6 +2886,7 @@ mod tests {
         assert_eq!(note.body, stored);
         assert!(preferences.cursor > 0);
         deletion_navigation(&app);
+        sync_with_another_device(&app);
         if std::env::var_os("NOTEBOOK_BENCH_UI").is_some() {
             benchmark_ui(&app);
         }
@@ -2231,9 +2895,148 @@ mod tests {
         }
     }
 
+    fn sync_with_another_device(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let ui = test_ui(app, dir.path().join("window.db"));
+        pump_until(|| ui.state.borrow().ready);
+
+        let laptop_db = dir.path().join("laptop.db");
+        let laptop_config = dir.path().join("laptop.json");
+        let mut settings = sync::Config::load(&laptop_config);
+        settings.device_name = "Laptop".into();
+        settings.save(&laptop_config).unwrap();
+        let (laptop, _laptop_events) = storage::spawn_worker(laptop_db.clone());
+        laptop.send(Command::Initialize).unwrap();
+        let laptop_sync = sync::spawn(
+            laptop_config,
+            laptop_db.clone(),
+            laptop.clone(),
+            sync::Options {
+                mdns: false,
+                ..Default::default()
+            },
+        );
+        let laptop_status = RefCell::new(sync::Status::default());
+        let laptop_now = |check: &dyn Fn(&sync::Status) -> bool| {
+            if let Some(status) = laptop_sync.status() {
+                *laptop_status.borrow_mut() = status;
+            }
+            check(&laptop_status.borrow())
+        };
+        laptop_sync.send(Control::SetEnabled(true));
+
+        gtk::prelude::WidgetExt::activate_action(&ui.window, "win.sync", None).unwrap();
+        let dialog = || ui.sync_dialog.borrow().as_ref().map(|d| d.window.clone());
+        assert_eq!(dialog().unwrap().title().as_deref(), Some("Sync"));
+        assert!(!sync_dialog(&ui, |d| d.pairing_box.is_sensitive()));
+        sync_dialog(&ui, |d| d.enabled.set_active(true));
+        let reachable = |s: &sync::Status| {
+            s.addr
+                .as_ref()
+                .is_some_and(|a| a.ip_addrs().next().is_some())
+        };
+        pump_until(|| reachable(&ui.sync_status.borrow()) && laptop_now(&reachable));
+        assert!(sync_dialog(&ui, |d| d.pairing_box.is_sensitive()));
+        // Stand in for the local network.
+        ui.sync.send(Control::Introduce(
+            laptop_status.borrow().addr.clone().unwrap(),
+        ));
+        laptop_sync.send(Control::Introduce(
+            ui.sync_status.borrow().addr.clone().unwrap(),
+        ));
+
+        ui.sync.send(Control::StartPairing);
+        pump_until(|| matches!(ui.sync_status.borrow().pairing, Pairing::Showing(_)));
+        let code = sync_dialog(&ui, |d| d.code.text().to_string());
+        assert_eq!(code.len(), 7, "{code:?}");
+        assert_eq!(
+            sync_dialog(&ui, |d| d.pairing.visible_child_name()).as_deref(),
+            Some("showing")
+        );
+        let shots = std::env::var_os("NOTEBOOK_TEST_SCREENSHOTS").map(std::path::PathBuf::from);
+        let shoot = |name: &str| {
+            if let Some(directory) = &shots {
+                let wait = Instant::now() + Duration::from_millis(150);
+                pump_until(|| Instant::now() >= wait);
+                screenshot_window(&dialog().unwrap(), &directory.join(name));
+            }
+        };
+        shoot("sync-code.png");
+        laptop_sync.send(Control::JoinPairing(code));
+        pump_until(|| {
+            ui.sync_status
+                .borrow()
+                .devices
+                .iter()
+                .any(|d| d.name == "Laptop" && d.connected)
+                && laptop_now(&|s| s.devices.iter().any(|d| d.connected))
+        });
+        assert_eq!(
+            sync_dialog(&ui, |d| d.pairing_note.text()),
+            "Paired with Laptop."
+        );
+        assert!(ui.sync_button.has_css_class("sync-active"));
+        shoot("sync-paired.png");
+
+        // A note written on the laptop appears in the list, and edits to it
+        // arrive in the open editor.
+        let note = Note::blank();
+        laptop.send(Command::Create(note.clone())).unwrap();
+        let save = |body: &str| {
+            laptop
+                .send(Command::Save {
+                    id: note.id.clone(),
+                    body: body.into(),
+                    sequence: 1,
+                })
+                .unwrap()
+        };
+        save("From the laptop");
+        pump_until(|| {
+            ui.state
+                .borrow()
+                .notes
+                .iter()
+                .any(|n| n.label == "From the laptop")
+        });
+        dialog().unwrap().close();
+        ui.open_note(&note.id);
+        let text = || {
+            let buffer = ui.editor.buffer();
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        pump_until(|| text() == "From the laptop");
+        save("From the laptop, edited there");
+        pump_until(|| text() == "From the laptop, edited there");
+        let buffer = ui.editor.buffer();
+        buffer.place_cursor(&buffer.end_iter());
+        buffer.insert_at_cursor(" and here");
+        let laptop_body = || {
+            storage::Repository::open(&laptop_db)
+                .unwrap()
+                .load(&note.id)
+                .unwrap()
+                .map(|n| n.body)
+        };
+        pump_until(|| laptop_body().as_deref() == Some("From the laptop, edited there and here"));
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+    }
+
+    fn sync_dialog<T>(ui: &Ui, read: impl FnOnce(&SyncDialog) -> T) -> T {
+        read(
+            ui.sync_dialog
+                .borrow()
+                .as_ref()
+                .expect("the Sync window is open"),
+        )
+    }
+
     fn deletion_navigation(app: &gtk::Application) {
         let dir = tempfile::tempdir().unwrap();
-        let ui = build(app, dir.path().join("deletion.db"));
+        let ui = test_ui(app, dir.path().join("deletion.db"));
         pump_until(|| ui.state.borrow().ready && ui.state.borrow().notes.len() == 1);
         for count in 2..=4 {
             ui.new_note();
@@ -2350,7 +3153,7 @@ mod tests {
         })
         .unwrap();
         drop(repo);
-        let ui = build(app, path);
+        let ui = test_ui(app, path);
         pump_until(|| {
             ui.state.borrow().ready
                 && ui.state.borrow().notes.len() == 4
@@ -2374,15 +3177,15 @@ mod tests {
     }
 
     fn screenshot(ui: &Ui, path: &std::path::Path) {
-        let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
+        screenshot_window(ui.window.upcast_ref(), path);
+    }
+
+    fn screenshot_window(window: &gtk::Window, path: &std::path::Path) {
+        let paintable = gtk::WidgetPaintable::new(Some(window));
         let snapshot = gtk::Snapshot::new();
-        paintable.snapshot(
-            &snapshot,
-            ui.window.width() as f64,
-            ui.window.height() as f64,
-        );
+        paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
         let node = snapshot.to_node().unwrap();
-        let texture = ui.window.renderer().unwrap().render_texture(&node, None);
+        let texture = window.renderer().unwrap().render_texture(&node, None);
         texture.save_to_png(path).unwrap();
     }
 
@@ -2407,7 +3210,7 @@ mod tests {
         .unwrap();
         drop(repo);
         let start = Instant::now();
-        let ui = build(app, path);
+        let ui = test_ui(app, path);
         pump_until(|| {
             ui.state.borrow().ready
                 && ui.state.borrow().parsed_generation > 0

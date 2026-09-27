@@ -11,6 +11,7 @@ A native Linux note-taking app built with Rust and GTK4. Organize your notes int
 - **Automatic saving** as you write, with your last note and cursor position restored when you reopen the app.
 - **Focus mode** to hide navigation and give your writing more room.
 - **Trash and restore** for recovering deleted notes.
+- **Sync between your devices**, peer to peer. Pair devices with a code; edits made on several devices at once merge instead of overwriting each other.
 - **Native appearance** that follows your GTK theme, including light and dark modes.
 
 ## Build and run
@@ -59,6 +60,16 @@ Search finds notes across all notebooks. While viewing **Trash**, search finds d
 
 Markdown is stored as plain text and preserved when copied. **Ctrl+click** opens web and email links. Tables, images, and HTML remain source text.
 
+### Syncing your devices
+
+Sync is off until you turn it on. Open the sync button in the header bar, or **Sync devices** in the menu, and turn on **Sync with your other devices** on each device.
+
+To pair two devices, choose **Show a pairing code** on one and enter that code on the other. Both devices must be on the same local network while pairing, and each code expires after five minutes or three wrong attempts. Paired devices find each other on the local network and sync whenever they can reach each other, including changes made while they were apart. Notes open in the editor update as the other device types, and **Undo** only undoes your own edits. **Remove** stops syncing with a device.
+
+Notes travel directly between your devices over encrypted connections, and only paired devices can connect. Without a relay, nothing leaves your local network. To sync devices on different networks, run a relay server such as [`iroh-relay`](https://docs.iroh.computer/concepts/relays) and enter its address under **Sync over the internet** on every device. The relay only passes along encrypted traffic.
+
+Devices find each other with mDNS and sync over UDP, so a firewall must allow both on the local network.
+
 ### Keyboard shortcuts
 
 | Action | Shortcut |
@@ -79,8 +90,10 @@ Notes are stored locally in a SQLite database at:
 ~/.local/share/notebook/notebook.db
 ```
 
-If `XDG_DATA_HOME` is set to an absolute path, the location is `$XDG_DATA_HOME/notebook/notebook.db` instead. To back up your notes, close Notebook and copy its data directory.
+If `XDG_DATA_HOME` is set to an absolute path, the location is `$XDG_DATA_HOME/notebook/notebook.db` instead. To back up your notes, close Notebook and copy its data directory. The database keeps each note's edit history so that devices can merge their changes.
+
+Sync settings, this device's private key, and the list of paired devices are kept separately, in `~/.config/notebook/sync.json` (or under `$XDG_CONFIG_HOME`). Copying your notes to another computer therefore doesn't copy its sync identity: pair the new computer, and its copy of the notes merges without duplicating them.
 
 Notebook saves after a short pause in typing and at least every two seconds while you keep writing. If saving fails, it keeps your draft in memory and offers a retry. Undo history lasts for the current session.
 
-This version does not include sync, import/export, attachments, or permanent deletion of trashed notes.
+This version does not include import/export, attachments, or permanent deletion of trashed notes.

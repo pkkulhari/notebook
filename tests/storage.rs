@@ -202,7 +202,7 @@ fn worker_orders_saves_across_switches_and_flushes_before_shutdown() {
 }
 
 #[test]
-fn schema_starts_at_version_one_and_reopening_preserves_it() {
+fn schema_is_current_and_reopening_preserves_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("notes.db");
     drop(Repository::open(&path).unwrap());
@@ -211,7 +211,7 @@ fn schema_starts_at_version_one_and_reopening_preserves_it() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
     assert_eq!(
         db.query_row("SELECT count(*) FROM notebooks", [], |r| r.get::<_, i64>(0))
@@ -240,15 +240,15 @@ fn future_schema_versions_are_rejected_without_changing_data() {
     repo.save(&note.id, "Keep this note").unwrap();
     drop(repo);
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("PRAGMA user_version=2").unwrap();
+    db.execute_batch("PRAGMA user_version=3").unwrap();
     let error = Repository::open(&path)
         .err()
-        .expect("must reject version 2");
+        .expect("must reject version 3");
     assert!(error.to_string().contains("newer version"));
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     assert_eq!(
         db.query_row("SELECT body FROM notes WHERE id=?1", [&note.id], |r| {
