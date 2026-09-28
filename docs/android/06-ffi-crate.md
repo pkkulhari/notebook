@@ -1,0 +1,171 @@
+# 6. FFI crate
+
+**Status:** Not started
+**Needs:** steps 3, 4 and 5
+**Adds:** `crates/ffi` (package `notebook-ffi`)
+
+## Goal
+
+A thin layer that exposes `notebook-core` to Kotlin through UniFFI. It holds no business logic of its own: it wires the storage worker, sync thread and `Drafts` together, maps types, and enforces the threading rules below. Everything here should be simple enough to test from Rust on the desktop.
+
+## Crate setup
+
+```toml
+[package]
+name = "notebook-ffi"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "notebook_ffi"
+
+[[bin]]
+name = "uniffi-bindgen"          # pins the generator to the library's UniFFI version
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+notebook-core = { path = "../core" }
+uniffi = { version = "<latest>", features = ["cli"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "<same version as rustls-platform-verifier uses>"
+rustls-platform-verifier = "<same version iroh resolves>"
+```
+
+- `src/lib.rs` starts with `uniffi::setup_scaffolding!();` and uses proc macros only, with no UDL file.
+- `uniffi.toml` sets the Kotlin package to `com.pkkulhari.notebook.core` and `cdylib_name` to `notebook_ffi`.
+- Add `crates/ffi` to `[workspace] members`, but not to `default-members`, so desktop builds don't compile it.
+
+## Threading rules
+
+These rules keep the text widget and the editor's document identical. Both the Rust and Kotlin sides must follow them.
+
+1. **Every call that changes or reads a draft's text happens on the Android main thread**, in the same order as the `EditText` changes. That covers `openDraft`, `insert`, `delete`, `replace`, `undo`, `redo` and `importDelta`.
+2. **A storage change to an open note reaches Kotlin as an event.** Kotlin then calls `importDelta` on the main thread and applies the returned edits at once. The FFI layer never imports into a draft on its own thread. If it did, the document would get ahead of the `EditText`, and the next keystroke would land in the wrong place.
+3. **Bookkeeping that doesn't change text is handled in Rust as soon as the event arrives:** `Saved` → `drafts.saved`, `Created` → `drafts.created`, and failed saves recorded for retry. The event is then forwarded to Kotlin.
+4. **`Drafts` sits behind a `Mutex`.** The main thread holds it only for the length of a call, and the event thread holds it only for bookkeeping.
+5. **Listener callbacks run on a Rust thread.** Kotlin posts them to the main thread before touching any UI or calling back into `Core`.
+
+## API sketch
+
+```rust
+#[derive(uniffi::Record)]
+pub struct CoreConfig {
+    pub database_path: String,       // filesDir/notebook.db
+    pub sync_config_path: String,    // noBackupFilesDir/sync.json
+    pub device_name: String,         // Settings.Global.DEVICE_NAME or Build.MODEL
+}
+
+#[uniffi::export(with_foreign)]
+pub trait CoreListener: Send + Sync {
+    fn on_event(&self, event: CoreEvent);
+    fn on_sync_status(&self, status: SyncStatus);
+}
+
+#[derive(uniffi::Object)]
+pub struct Core { /* commands, drafts: Mutex<Drafts>, sync: SyncHandle, failed */ }
+
+#[uniffi::export]
+impl Core {
+    #[uniffi::constructor]
+    pub fn start(config: CoreConfig, listener: Arc<dyn CoreListener>) -> Arc<Self>;
+
+    // Storage
+    pub fn initialize(&self);
+    pub fn list(&self, filter: Filter, query: String, generation: i64);
+    pub fn load(&self, id: String, generation: i64);
+    pub fn create_note(&self) -> NoteInfo;        // installs an empty draft, sends Create
+    pub fn mutate(&self, mutation: Mutation);
+    pub fn save_preferences(&self, selected_note: Option<String>, cursor: i32);
+    pub fn flush(&self);                            // flush drafts, then Command::Flush
+    pub fn retry(&self);                            // resend failed commands
+
+    // Editor (main thread only)
+    pub fn open_draft(&self, note: NoteInfo, snapshot: Vec<u8>) -> String;   // returns text
+    pub fn insert(&self, id: String, at: i32, text: String) -> Result<(), CoreError>;
+    pub fn delete(&self, id: String, at: i32, len: i32) -> Result<(), CoreError>;
+    pub fn replace(&self, id: String, at: i32, len: i32, text: String) -> Result<(), CoreError>;
+    pub fn undo(&self, id: String) -> Option<Applied>;
+    pub fn redo(&self, id: String) -> Option<Applied>;
+    pub fn import_delta(&self, id: String, delta: Vec<u8>) -> Applied;
+    /// Sends saves that are due; returns milliseconds until the next one, or -1.
+    pub fn tick(&self) -> i64;
+    pub fn trim_drafts(&self, active: Option<String>);
+
+    // Sync
+    pub fn sync(&self, control: SyncControl);
+}
+
+#[uniffi::export] pub fn parse_markdown(text: String) -> Arc<MarkdownDocument>;
+#[uniffi::export] pub fn list_enter(line: String) -> Option<ListEnter>;
+```
+
+### Events
+
+`CoreEvent` mirrors `storage::Event`:
+
+- `Ready { default_notebook_id, notebooks, note, snapshot, cursor }`
+- `Listed { notes, counts, generation }`
+- `Loaded { note, snapshot, generation }`
+- `Created { id }` and `Saved { id }`
+- `Mutated { mutation, notebooks }`
+- `NoteDelta { id, delta }` and `Remote { notes, notebooks }`
+- `Flushed`
+- `Error { operation, message, retryable }`
+
+A thread named `notebook-events`, owned by `Core`, blocks on the storage `Receiver<Event>`. It applies rule 3, then calls `listener.on_event`. Sync status comes through the sink added in step 5 and goes straight to `listener.on_sync_status`.
+
+### Type mapping
+
+| Core | FFI |
+| --- | --- |
+| `Filter` | `uniffi::Enum`: `Notebook { id }`, `All`, `Trash` |
+| `NoteCounts` (`HashMap<Filter, u64>`) | `Vec<NoteCount { filter, count: i64 }>` |
+| `Note` | `NoteInfo { id, notebook_id, deleted }` (no body; the text comes from the draft) |
+| `NoteSummary`, `Notebook`, `NoteState`, `Mutation` | records or enums with the same fields |
+| `TextEdit`, `Applied` | `uniffi::Enum` and `Record`, positions as `i32` UTF-16 units |
+| `sync::Status` | `SyncStatus` without `EndpointAddr`: `running: bool` replaces `addr` |
+| `sync::Pairing` | `uniffi::Enum` |
+| `Control` | `SyncControl`, without `Introduce` and `Shutdown` |
+| `Box<dyn Error>` | `CoreError::OutOfSync { message }` (the only synchronous error) |
+
+- Use `i32` for text positions (Java strings are `int`-indexed) and `i64` for generations, sequences and timestamps. Kotlin's unsigned types are awkward, so keep them out of the API.
+- `Drafts` is created with `Units::Utf16`.
+- `CoreError::OutOfSync` means Kotlin passed a position outside the draft. That should never happen. If it does, Kotlin logs it, flushes, and reloads the note from storage, because it's safer than guessing.
+
+### Markdown
+
+`MarkdownDocument` is a `uniffi::Object` that wraps `markdown::Document` parsed in UTF-16 units. It has these methods:
+
+- `spans() -> Vec<StyledRange>`, where the `style` field is an enum: `H1`, `H2`, `H3`, `Strong`, `Emphasis`, `Strike`, `Quote`, `Code`, `CodeBlock`, `Link`, `Task`, `Checked` and `ListItemStart`
+- `list_markers() -> Vec<TextRange>`
+- `hidden_outside(start: i32, end: i32) -> Vec<TextRange>`, called on every selection change without copying the whole document across
+- `link_at(position: i32) -> Option<String>`
+- `in_code_block(position: i32) -> bool`, used by list continuation
+
+## TLS for relays
+
+This is the only hand-written JNI in the app. `rustls-platform-verifier` needs an Android `Context` before it verifies any certificate, and UniFFI can't pass one. Add one export:
+
+```
+Java_com_pkkulhari_notebook_NativeTls_init(env, class, context)
+  → rustls_platform_verifier::android::init_with_env(&mut env, context)
+```
+
+The Kotlin side is `object NativeTls { external fun init(context: Context) }`, called once in `Application.onCreate` before `Core.start`. Use the same `jni` and `rustls-platform-verifier` versions that iroh resolves in `Cargo.lock`, so only one copy of each is linked.
+
+## Logging
+
+Add an optional `logcat` feature, on only in debug builds. It installs a `tracing` subscriber that writes to logcat, such as the `paranoid-android` crate. It makes iroh's connection logs visible while working on step 10. Release builds don't include it.
+
+## Tests (host, in `crates/ffi/tests`)
+
+1. `start` in a temp directory with a recording listener, then `initialize`: `Ready` arrives with a note.
+2. `open_draft`, `insert` after an emoji, then `tick` after 300 ms: `Saved` arrives, and reloading from storage shows the same text.
+3. `import_delta` built from a second `Repository`'s change returns edits in UTF-16 units that turn the old text into the new.
+4. `insert` with a position past the end returns `OutOfSync` and leaves the draft unchanged.
+5. `flush` followed by `Flushed`: every earlier save is acknowledged first.
+6. Dropping `Core` stops the event thread and the sync thread; the test must not hang.
+
+## Notes
+
+_Anything surprising goes here._
