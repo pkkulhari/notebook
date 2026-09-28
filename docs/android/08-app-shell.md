@@ -21,7 +21,7 @@ Use framework Views and as few AndroidX libraries as possible:
 
 ```
 app/src/main/java/com/pkkulhari/notebook/
-  NotebookApp.kt        Application: NativeTls.init, starts Core once per process
+  NotebookApp.kt        Application: AndroidContext.install, starts Core once per process
   MainActivity.kt       the only Activity; shows the list screen or the editor screen
   Store.kt              main-thread copy of app state, updated from CoreEvent
   NoteListAdapter.kt    RecyclerView adapter for NoteSummary rows
@@ -90,7 +90,7 @@ Step 9 builds on this.
 
 | Moment | Action |
 | --- | --- |
-| `Application.onCreate` | `NativeTls.init(this)`, then `Core.start(config, listener)` with paths from `filesDir` and `noBackupFilesDir`, then `initialize()`. The core lives as long as the process. |
+| `Application.onCreate` | `AndroidContext.install(this)`, then `Core.start(config, listener)` with paths from `filesDir` and `noBackupFilesDir`, then `initialize()`. The core lives as long as the process. |
 | `Activity.onPause` | `core.flush()` sends every unsaved edit, then a `Flush`. Save preferences: the selected note and the cursor. |
 | `Activity.onStop` | Nothing more here; step 10 suspends sync. |
 | Process death | Anything storage acknowledged is on disk (`PRAGMA synchronous=FULL`). `onPause` hands the last keystrokes to the storage thread, which writes them within milliseconds. |

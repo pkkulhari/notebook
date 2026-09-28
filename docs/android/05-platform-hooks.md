@@ -62,17 +62,28 @@ Control::Suspend(bool)
 
 ## 5. Network changes
 
-On Android, interface monitoring inside iroh may be limited (check step 1's findings). Add:
+netwatch's Android route monitor does nothing, so iroh never notices a network change by itself. Recovery on a LAN still works without help, through mDNS rediscovery and the 10 s redial. In the spike, sync reconnected 1.5 s after Wi-Fi returned from a 45 s outage. Add:
 
 ```rust
 Control::NetworkChanged
 ```
 
-This calls `node.endpoint.network_change().await`, then `self.tick()` to redial devices that aren't connected. Android sends it from a `ConnectivityManager.NetworkCallback`. Desktop never needs to send it.
+This calls `node.endpoint.network_change().await`, then `self.tick()` to redial devices that aren't connected. Android sends it from a `ConnectivityManager.NetworkCallback`, which cut the same reconnection to 0.6 s. Desktop never needs to send it. The spike carried exactly this patch.
 
-## 6. Nothing else needed
+## 6. Replace a stale session when a device reconnects
 
-- `Config::save` uses `std::os::unix::fs::OpenOptionsExt` with mode `0o600`. Android is Unix, so this works unchanged.
+When one side's process restarts, the other side keeps its dead session until QUIC's idle timeout of about 30 s. Meanwhile `Sync::adopt` (`src/sync.rs:730`) rejects the restarted device's new connection as a duplicate. In the spike, reopening the app left it disconnected for 19–30 s (spike Finding 10), and Android restarts app processes all the time.
+
+Change `adopt` so a new connection can replace a session that is no longer fresh:
+
+- **The existing session is young** (say, under 5 s old; record when each `Session` starts). This is two devices dialing each other at once, so keep the current rule, which keeps the connection dialed by the smaller ID.
+- **The existing session is older.** A device only dials a paired device it has no session with. A new connection long after the session started means the other side has lost it, usually because its process restarted. Replace the old session with the new connection.
+
+Dropping the old `Session` aborts its task. Nothing is lost, because the new session starts with a digest exchange.
+
+## 7. Nothing else needed
+
+- `Config::save` uses `std::os::unix::fs::OpenOptionsExt` with mode `0o600`. Android is Unix, so this works unchanged (confirmed in the spike).
 - `Command::Flush` / `Event::Flushed` already give Android a way to wait until earlier saves are on disk (step 8).
 - `Repository::open` creates the parent directories itself.
 
@@ -83,6 +94,8 @@ This calls `node.endpoint.network_change().await`, then `self.tick()` to redial 
 3. `NetworkChanged` while connected leaves the session up. While disconnected, it triggers a dial.
 4. The status sink receives a status on startup and after each change, the same statuses the channel used to carry.
 5. With no `device_name` in the config, the default argument is used and saved. With one present, the argument is ignored.
+6. Two nodes connected; drop node B's `SyncHandle` and start a new one on the same config and database. A accepts B's new connection at once, without waiting for the old one to time out. Test this with both A and B as the original dialer.
+7. Two nodes dialing each other at the same moment still end up with exactly one session, as the existing simultaneous-dial test checks.
 
 ## Notes
 

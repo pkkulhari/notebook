@@ -20,8 +20,9 @@ The existing skeleton in `android/`:
 
 ### 1. Kotlin
 
-- AGP 9 builds Kotlin itself, so check that a first `.kt` file compiles without adding `org.jetbrains.kotlin.android`. If it doesn't, add the plugin through the version catalog.
+- AGP 9's built-in Kotlin compiles `.kt` sources with no Kotlin plugin applied (confirmed in the spike). Don't add `org.jetbrains.kotlin.android`: it's incompatible with AGP 9's new DSL.
 - Set the Java/Kotlin target to 17.
+- Pin the NDK in `android { ndkVersion = "29.0.14206865" }` so AGP strips with the same NDK that cargo-ndk builds with.
 
 ### 2. Dependencies
 
@@ -29,34 +30,33 @@ Keep the list short. Step 8 decides the UI dependencies.
 
 | Dependency | Why |
 | --- | --- |
-| `net.java.dev.jna:jna:<version>@aar` | Needed at runtime by UniFFI's Kotlin bindings |
-| `org.rustls:rustls-platform-verifier` | Kotlin half of the TLS verifier (step 6); its version is read from `Cargo.lock` |
+| `net.java.dev.jna:jna:5.19.1`, as an AAR | Needed at runtime by UniFFI's Kotlin bindings |
 
-Remove `androidx.appcompat` and `com.google.android.material` if step 8 goes framework-only.
-
-The verifier is published in a Maven repository on GitHub. Because `settings.gradle.kts` uses `RepositoriesMode.FAIL_ON_PROJECT_REPOS`, declare the repository there, not in the app module:
+Add JNA through the version catalog and request the AAR:
 
 ```kotlin
-dependencyResolutionManagement {
-    repositories {
-        google()
-        mavenCentral()
-        maven("https://github.com/rustls/rustls-platform-verifier/raw/maven-archive/android-release-support/maven/")
-    }
-}
+implementation(libs.jna) { artifact { type = "aar" } }
 ```
 
-Read the version from the `rustls-platform-verifier-android` entry in `../Cargo.lock`. The crate's README has a configuration-cache-friendly `ValueSource` for this. That way, a `cargo update` can never leave the Kotlin and Rust halves mismatched.
+No TLS verifier artifact is needed. iroh verifies relay certificates with built-in roots (spike Finding 6).
+
+Remove `androidx.appcompat`, `androidx.core` and `com.google.android.material` if step 8 goes framework-only; the spike ran fine without them on a `android:Theme.DeviceDefault.DayNight` theme.
 
 ### 3. Rust build tasks
 
-Put these in `app/build.gradle.kts`, or in a small `buildSrc` convention plugin if it grows.
+Put these in `app/build.gradle.kts`, or in a small `buildSrc` convention plugin if it grows. `spike/build-android.sh` on `android-spike` is a working shell version of the same steps.
 
 | Task | Command | Output |
 | --- | --- | --- |
-| `cargoBuildDebug` | `cargo ndk -t arm64-v8a -t x86_64 --platform <minSdk> -o build/rustJniLibs/debug build -p notebook-ffi` | `.so` per ABI |
-| `cargoBuildRelease` | `cargo ndk -t arm64-v8a --platform <minSdk> -o build/rustJniLibs/release build -p notebook-ffi --profile android` | `.so` for arm64 only |
-| `uniffiBindings` | `cargo build -p notebook-ffi`, then `cargo run -p notebook-ffi --bin uniffi-bindgen -- generate --library ../target/debug/libnotebook_ffi.so --language kotlin --out-dir build/generated/uniffi` | Kotlin sources |
+| `cargoBuildDebug` | `cargo ndk -t arm64-v8a -t x86_64 -P 35 -o build/rustJniLibs/debug build -p notebook-ffi --lib` | `.so` per ABI |
+| `cargoBuildRelease` | `cargo ndk -t arm64-v8a -P 35 -o build/rustJniLibs/release build -p notebook-ffi --lib --profile android` | `.so` for arm64 only |
+| `uniffiBindings` | `cargo build -p notebook-ffi`, then `target/debug/uniffi-bindgen generate target/debug/libnotebook_ffi.so --language kotlin --out-dir <build>/generated/uniffi --no-format` | Kotlin sources |
+
+Notes on these commands:
+
+- **`-P` is required.** cargo-ndk defaults to API 21. NDK r29's sysroot stops at API 35, and building for 35 is fine because the native API level only has to be at or below minSdk 36.
+- **cargo-ndk's `-o` copies every cdylib in the build**, including iroh's and iroh-relay's own. Have the task copy only `libnotebook_ffi.so` into the `jniLibs` directory.
+- **Bindgen reads the host library.** The API is the same on every target. Don't pass `--library`: it's deprecated in UniFFI 0.32 and ignored.
 
 Wire them up as follows:
 
@@ -76,15 +76,16 @@ lto = "fat"
 codegen-units = 1
 ```
 
-- Keep `panic = "unwind"`, because UniFFI turns Rust panics into Kotlin exceptions.
-- Step 11 decides whether `opt-level = "s"` is worth its speed cost.
+- Keep `panic = "unwind"`. UniFFI turns Rust panics into Kotlin exceptions, and iroh's DNS resolver needs unwinding to recover (spike Finding 7).
+- In the spike, this profile gave a 16.2 MB stripped `.so`, which built in about 80 s. `opt-level = "s"` gave 14.1 MB; step 11 decides whether that's worth its speed cost.
+- cargo-ndk 4 doesn't strip. `strip = true`, inherited from `release`, does it.
 
 ### 5. 16 KB pages
 
 Devices on Android 15 and later may use 16 KB memory pages, and Google Play requires 16 KB-aligned native libraries.
 
-- NDK r28+ links with 16 KB alignment by default. On older NDKs, add `-C link-arg=-Wl,-z,max-page-size=16384`.
-- Check the release `.so` with `llvm-readelf -l` (every `LOAD` segment should have `Align 0x4000`) and the APK with `zipalign -c -P 16 -v 4`.
+- NDK r28+ links with 16 KB alignment by default. The spike's r29 build had `Align 0x4000` on every `LOAD` segment.
+- Check the release `.so` with `llvm-readelf -l` and the APK with `zipalign -c -P 16 -v 4`. Both passed in the spike, including JNA's `libjnidispatch.so`.
 
 ### 6. R8 keep rules
 
@@ -94,7 +95,7 @@ Add these to `app/src/main/keepRules/rules.keep` now, even though R8 stays off u
 -keep class com.sun.jna.** { *; }
 -keep class * implements com.sun.jna.** { *; }
 -keep class com.pkkulhari.notebook.core.** { *; }
--keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
+-keep class com.pkkulhari.notebook.AndroidContext { *; }
 ```
 
 ### 7. Smoke test

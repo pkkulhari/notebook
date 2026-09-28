@@ -51,8 +51,12 @@ Sync runs while the app is visible. Peer-to-peer sync needs both apps open anywa
 | `Activity.onStop` | `flush()`, then `sync(Suspend(true))`, then unregister the callback and release the lock. |
 | Sync turned on or off | Acquire or release the lock to match. |
 
-- **Multicast lock:** `WifiManager.createMulticastLock("notebook-sync")` with `setReferenceCounted(false)`. Without it, many phones drop incoming mDNS packets.
-- **Network callback:** `ConnectivityManager.registerDefaultNetworkCallback`. Send `NetworkChanged` from `onAvailable`, `onLost` and `onLinkPropertiesChanged`, debounced by 500 ms.
+- **Multicast lock:** `WifiManager.createMulticastLock("notebook-sync")` with `setReferenceCounted(false)`. Without it, many phones drop incoming mDNS packets. On the spike's phone, Google Play services and the system's `NsdService` already held locks, which is why mDNS worked without ours. Don't rely on that.
+- **Network callback:** `ConnectivityManager.registerDefaultNetworkCallback`. Send `NetworkChanged` from `onAvailable`, `onLost` and `onLinkPropertiesChanged`, debounced by 500 ms. In the spike this cut reconnection after a Wi-Fi outage from 1.5 s to 0.6 s.
+- **mDNS cost:** swarm-discovery sends a query about every 0.7 s for as long as the endpoint runs, with no back-off (75–83 a minute in the spike). Suspending in `onStop` already limits that to while the app is visible.
+  - Worth considering: pause discovery while every paired device is connected.
+  - Also propose a cadence option upstream, since `iroh-mdns-address-lookup` doesn't expose swarm-discovery's `with_cadence`.
+- **Reopening the app:** until step 5's stale-session fix lands, a device the phone synced with before the app restarted can take up to 30 s to reconnect.
 - **Pairing across backgrounding:** suspending cancels a pairing in progress, just as stopping sync does on the desktop. When the app comes back, the pairing section shows its idle state again.
 
 ## Files and backup
@@ -62,9 +66,10 @@ Sync runs while the app is visible. Peer-to-peer sync needs both apps open anywa
   - Include `notebook.db` together with its `-wal` file, so a backup is never missing recent writes.
   - Exclude nothing else. Cache and the no-backup directory are already excluded.
 
-## TLS
+## Android context and TLS
 
-Relays use HTTPS. `NativeTls.init(context)` (step 6) must run in `Application.onCreate` before `Core.start`, or the first relay connection panics inside `rustls-platform-verifier`.
+- `AndroidContext.install(context)` (step 6) must run in `Application.onCreate` before `Core.start`. Without it, iroh can't read the network's DNS servers and falls back to 1.1.1.1 and 8.8.8.8. That bypasses the user's network or private DNS, and fails on networks that block outside DNS.
+- Relay TLS needs no setup. iroh uses built-in webpki roots, and the spike synced through n0's public relay with no verifier initialised.
 
 ## Interop tests (manual, on real devices)
 

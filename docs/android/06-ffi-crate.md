@@ -24,13 +24,19 @@ path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
 notebook-core = { path = "../core" }
-uniffi = { version = "<latest>", features = ["cli"] }
+uniffi = "=0.32.2"
+
+# The bindings generator (clap and friends) is only built for the host.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+uniffi = { version = "=0.32.2", features = ["cli"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-jni = "<same version as rustls-platform-verifier uses>"
-rustls-platform-verifier = "<same version iroh resolves>"
+iroh = "1.2"                                          # for install_android_jni_context
+jni = { version = "0.22", default-features = false }
 ```
 
+- `src/bin/uniffi-bindgen.rs` is `fn main() { #[cfg(not(target_os = "android"))] uniffi::uniffi_bindgen_main() }`.
+- Every Android profile keeps `panic = "unwind"`. UniFFI turns panics into Kotlin exceptions, and iroh's DNS resolver relies on unwinding to recover from a missing Android context (spike Finding 7).
 - `src/lib.rs` starts with `uniffi::setup_scaffolding!();` and uses proc macros only, with no UDL file.
 - `uniffi.toml` sets the Kotlin package to `com.pkkulhari.notebook.core` and `cdylib_name` to `notebook_ffi`.
 - Add `crates/ffi` to `[workspace] members`, but not to `default-members`, so desktop builds don't compile it.
@@ -142,20 +148,30 @@ A thread named `notebook-events`, owned by `Core`, blocks on the storage `Receiv
 - `link_at(position: i32) -> Option<String>`
 - `in_code_block(position: i32) -> bool`, used by list continuation
 
-## TLS for relays
+## Android context for DNS
 
-This is the only hand-written JNI in the app. `rustls-platform-verifier` needs an Android `Context` before it verifies any certificate, and UniFFI can't pass one. Add one export:
+This is the only hand-written JNI in the app. iroh reads the network's DNS servers through JNI, which needs the JVM and the application `Context`, and UniFFI can't pass either. Add one export, as the spike did (`spike/ffi/src/android.rs` on `android-spike`):
 
 ```
-Java_com_pkkulhari_notebook_NativeTls_init(env, class, context)
-  → rustls_platform_verifier::android::init_with_env(&mut env, context)
+Java_com_pkkulhari_notebook_AndroidContext_install(env: EnvUnowned, class: JClass, context: JObject)
+  → env.get_java_vm(), env.new_global_ref(context)            (never released)
+  → iroh::dns::install_android_jni_context(vm.get_raw(), context.into_raw())
 ```
 
-The Kotlin side is `object NativeTls { external fun init(context: Context) }`, called once in `Application.onCreate` before `Core.start`. Use the same `jni` and `rustls-platform-verifier` versions that iroh resolves in `Cargo.lock`, so only one copy of each is linked.
+- Guard it with a `Once`. The underlying `ndk_context` asserts if it's installed twice.
+- The Kotlin side is `object AndroidContext { init { System.loadLibrary("notebook_ffi") }; @JvmStatic external fun install(context: Context) }`, called once in `Application.onCreate` before `Core.start`.
+- Load the library explicitly as shown: `install` can run before JNA has loaded it.
+- Without this call, iroh still works but falls back to 1.1.1.1 and 8.8.8.8 instead of the network's DNS (spike Finding 7).
+- No TLS setup is needed. iroh verifies relay certificates with built-in webpki roots and never calls `rustls-platform-verifier`, even though it's in `Cargo.lock` (spike Finding 6).
+- Two `jni` versions are linked either way: 0.21 via netdev and 0.22 here. That's expected.
 
 ## Logging
 
-Add an optional `logcat` feature, on only in debug builds. It installs a `tracing` subscriber that writes to logcat, such as the `paranoid-android` crate. It makes iroh's connection logs visible while working on step 10. Release builds don't include it.
+Add an optional `logcat` feature, on only in debug builds. It installs a `tracing` subscriber that writes to logcat through `paranoid-android`, as the spike did, and makes iroh's connection logs visible while working on step 10. Release builds don't include it.
+
+- Cap `loro_internal` at WARN, because Loro logs block diagnostics at INFO on every save.
+- Show DEBUG for `swarm_discovery`, `iroh_mdns_address_lookup`, `netwatch` and `n0_dns_resolver` when debugging discovery.
+- Set a panic hook that logs through `tracing`. Android discards stderr, so panics are otherwise invisible.
 
 ## Tests (host, in `crates/ffi/tests`)
 
