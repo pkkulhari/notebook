@@ -1291,6 +1291,7 @@ impl Ui {
             end.forward_to_line_end();
             buffer.remove_tag_by_name("hidden", &start, &end);
         }
+        guard_buffer_end(buffer);
     }
 
     /// Writes changes queued by a document import or undo into its buffer.
@@ -1395,6 +1396,7 @@ impl Ui {
         let start = buffer.start_iter();
         let end = buffer.end_iter();
         buffer.remove_all_tags(&start, &end);
+        guard_buffer_end(&buffer);
         self.state.borrow_mut().hidden_applied.clear();
         for span in &self.state.borrow().document.spans {
             buffer.apply_tag_by_name(
@@ -2496,6 +2498,18 @@ fn configure_tags(buffer: &gtk::TextBuffer) {
             .invisible(true)
             .build(),
     );
+    table.add(&gtk::TextTag::builder().name("end-guard").build());
+}
+
+// Workaround for a GTK bug: it aborts when a click below a last line with hidden text
+// overruns that line's final segment; a tag toggle before the closing newline keeps the
+// overrun harmless.
+fn guard_buffer_end(buffer: &gtk::TextBuffer) {
+    let end = buffer.end_iter();
+    let mut last = end;
+    if last.backward_char() {
+        buffer.apply_tag_by_name("end-guard", &last, &end);
+    }
 }
 
 #[cfg(test)]
@@ -2886,6 +2900,7 @@ mod tests {
         assert_eq!(note.body, stored);
         assert!(preferences.cursor > 0);
         deletion_navigation(&app);
+        click_below_hidden_last_line(&app);
         sync_with_another_device(&app);
         if std::env::var_os("NOTEBOOK_BENCH_UI").is_some() {
             benchmark_ui(&app);
@@ -3032,6 +3047,43 @@ mod tests {
                 .as_ref()
                 .expect("the Sync window is open"),
         )
+    }
+
+    fn click_below_hidden_last_line(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("click.db");
+        let mut repo = storage::Repository::open(&path).unwrap();
+        let mut note = Note::blank();
+        note.body = "Intro\n\nVisit [the site](https://example.org) today".into();
+        repo.create_note(&note).unwrap();
+        repo.save_preferences(&Preferences {
+            selected_note: Some(note.id.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        drop(repo);
+        let ui = test_ui(app, path);
+        pump_until(|| {
+            ui.state.borrow().ready
+                && ui.state.borrow().parsed_generation > 0
+                && ui.state.borrow().parsed_generation == ui.state.borrow().parse_generation
+        });
+        let buffer = ui.editor.buffer();
+        buffer.place_cursor(&buffer.start_iter());
+        let hidden = buffer.tag_table().lookup("hidden").unwrap();
+        assert!(
+            buffer
+                .iter_at_offset(buffer.char_count() - 8)
+                .has_tag(&hidden)
+        );
+        let (x, y) = ui.editor.window_to_buffer_coords(
+            gtk::TextWindowType::Widget,
+            ui.editor.width() - 1,
+            ui.editor.height() - 1,
+        );
+        let _ = ui.editor.iter_at_location(x, y);
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
     }
 
     fn deletion_navigation(app: &gtk::Application) {
