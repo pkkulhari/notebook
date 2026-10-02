@@ -30,7 +30,6 @@ import android.text.style.UnderlineSpan
 import android.view.View
 import com.pkkulhari.notebook.core.MarkdownDocument
 import com.pkkulhari.notebook.core.Style
-import com.pkkulhari.notebook.core.StyledRange
 import com.pkkulhari.notebook.core.TextRange
 import com.pkkulhari.notebook.core.parseMarkdown
 import java.io.File
@@ -74,6 +73,29 @@ class MarkdownStyler(private val text: NoteEditText) {
     private data class Key(val style: Style?, val start: Int, val end: Int)
 
     private class Styled(val key: Key, val spans: List<Any>)
+
+    /**
+     * A parse, with what placing it needs worked out up front: off the main
+     * thread for a parse while typing. `blocks` and `hidden` are for the
+     * selection when the parse began.
+     */
+    private class Parsed(
+        val document: MarkdownDocument,
+        val styles: MutableSet<Key>,
+        val indents: MutableSet<Key>,
+        val blocks: List<TextRange>,
+        val hidden: MutableSet<TextRange>,
+    ) {
+        companion object {
+            fun of(document: MarkdownDocument, start: Int, end: Int) = Parsed(
+                document,
+                document.spans().mapTo(HashSet()) { Key(it.style, it.start, it.end) },
+                document.listMarkers().mapTo(HashSet()) { Key(null, it.start, it.end) },
+                document.activeBlocks(start, end),
+                document.hiddenOutside(start, end).toHashSet(),
+            )
+        }
+    }
 
     /** Zero width and draws nothing: Markdown syntax outside the active block. */
     class HiddenSpan : ReplacementSpan() {
@@ -168,7 +190,7 @@ class MarkdownStyler(private val text: NoteEditText) {
         generation += 1
         val document = parseMarkdown(body)
         setDocument(document)
-        restyle(body, cursor, cursor, document.spans(), document.listMarkers())
+        restyle(body, cursor, cursor, Parsed.of(document, cursor, cursor))
     }
 
     fun attach() {
@@ -215,19 +237,20 @@ class MarkdownStyler(private val text: NoteEditText) {
     private fun request() {
         val generation = generation
         val source = text.text.toString()
+        val start = minOf(text.selectionStart, text.selectionEnd).coerceAtLeast(0)
+        val end = maxOf(text.selectionStart, text.selectionEnd).coerceAtLeast(0)
         newest = generation
         PARSER.execute {
             if (generation != newest) return@execute
             val document = parseMarkdown(source)
-            val spans = document.spans()
-            val markers = document.listMarkers()
+            val parsed = Parsed.of(document, start, end)
             main.post {
                 if (generation != this.generation) return@post document.close()
                 setDocument(document)
-                if (spans.size + markers.size - styles.size - indents.size > BULK_SPANS) {
-                    rebuild(spans, markers)
+                if (parsed.styles.size + parsed.indents.size - styles.size - indents.size > BULK_SPANS) {
+                    rebuild(parsed)
                 } else {
-                    relayout(place(overlay, text.selectionStart, text.selectionEnd, spans, markers))
+                    relayout(place(overlay, text.selectionStart, text.selectionEnd, parsed))
                 }
             }
         }
@@ -238,26 +261,20 @@ class MarkdownStyler(private val text: NoteEditText) {
      * many new spans, such as after a long paste: a SpannableStringBuilder
      * sorts each span as it's added, so hundreds one by one are slow.
      */
-    private fun rebuild(spans: List<StyledRange>, markers: List<TextRange>) {
-        restyle(text.text.toString(), text.selectionStart, text.selectionEnd, spans, markers)
+    private fun rebuild(parsed: Parsed) {
+        restyle(text.text.toString(), text.selectionStart, text.selectionEnd, parsed)
         relayout(listOf(0 until overlay.length))
     }
 
     /** Builds a new overlay for `body`, with no spans carried over. */
-    private fun restyle(
-        body: String,
-        selectionStart: Int,
-        selectionEnd: Int,
-        spans: List<StyledRange>,
-        markers: List<TextRange>,
-    ) {
+    private fun restyle(body: String, selectionStart: Int, selectionEnd: Int, parsed: Parsed) {
         // SpannableString appends spans, where SpannableStringBuilder keeps
         // them sorted as each comes; the copy sorts them all at once.
         val styled = SpannableString(body)
         styles = emptyList()
         indents = emptyList()
         hidden.clear()
-        place(styled, selectionStart, selectionEnd, spans, markers)
+        place(styled, selectionStart, selectionEnd, parsed)
         overlay = SpannableStringBuilder(styled)
     }
 
@@ -271,50 +288,43 @@ class MarkdownStyler(private val text: NoteEditText) {
      * Brings the spans in `target` up to the document's. Returns the ranges
      * that changed, for laying out again.
      */
-    private fun place(
-        target: Spannable,
-        selectionStart: Int,
-        selectionEnd: Int,
-        spans: List<StyledRange>,
-        markers: List<TextRange>,
-    ): List<IntRange> {
+    private fun place(target: Spannable, selectionStart: Int, selectionEnd: Int, parsed: Parsed): List<IntRange> {
         val start = minOf(selectionStart, selectionEnd).coerceAtLeast(0)
         val end = maxOf(selectionStart, selectionEnd).coerceAtLeast(0)
         val changed = mutableListOf<IntRange>()
-        styles = diff(target, styles, spans.map { Key(it.style, it.start, it.end) }, changed)
+        styles = diff(target, styles, parsed.styles, changed)
         // Indents depend on each marker's width in its own styling, so they're
         // measured after the other spans are in place.
-        indents = diff(target, indents, markers.map { Key(null, it.start, it.end) }, changed)
+        indents = diff(target, indents, parsed.indents, changed)
         shownBlocks = null
-        changed += updateHidden(target, start, end)
+        changed += updateHidden(target, start, end, parsed)
         updateLink(start)
         return changed
     }
 
     /**
      * Brings one kind of span (styles, or indents) to `wanted`, keeping the
-     * spans that still match. Spans move with the text they cover, so after an
-     * edit most do.
+     * spans that still match, and uses up `wanted`. Spans move with the text
+     * they cover, so after an edit most do.
      */
     private fun diff(
         target: Spannable,
         applied: List<Styled>,
-        wanted: List<Key>,
+        wanted: MutableSet<Key>,
         changed: MutableList<IntRange>,
     ): List<Styled> {
-        val missing = wanted.toMutableSet()
         val kept = ArrayList<Styled>(applied.size)
         for (styled in applied) {
             val first = styled.spans.first()
             val now = styled.key.copy(start = target.getSpanStart(first), end = target.getSpanEnd(first))
-            if (missing.remove(now)) {
+            if (wanted.remove(now)) {
                 kept += Styled(now, styled.spans)
             } else {
                 styled.spans.forEach(target::removeSpan)
                 if (now.start >= 0) changed += now.start until now.end
             }
         }
-        for (key in missing) {
+        for (key in wanted) {
             if (key.start >= key.end || key.end > target.length) continue
             val spans = create(target, key)
             for (span in spans) target.setSpan(span, key.start, key.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -344,13 +354,18 @@ class MarkdownStyler(private val text: NoteEditText) {
         )
     }
 
-    /** Returns changed syntax ranges; moving within the same blocks needs no relayout. */
-    private fun updateHidden(target: Spannable, start: Int, end: Int): List<IntRange> {
+    /**
+     * Returns changed syntax ranges; moving within the same blocks needs no
+     * relayout. A `parsed` that began with the same blocks showing has the
+     * syntax to hide worked out already.
+     */
+    private fun updateHidden(target: Spannable, start: Int, end: Int, parsed: Parsed? = null): List<IntRange> {
         val document = document ?: return emptyList()
         val blocks = document.activeBlocks(start, end)
         if (blocks == shownBlocks) return emptyList()
         shownBlocks = blocks
-        val wanted = document.hiddenOutside(start, end).toMutableSet()
+        val wanted = parsed?.hidden?.takeIf { parsed.blocks == blocks }
+            ?: document.hiddenOutside(start, end).toHashSet()
         val changed = mutableListOf<IntRange>()
         hidden.removeAll { span ->
             val range = TextRange(target.getSpanStart(span), target.getSpanEnd(span))

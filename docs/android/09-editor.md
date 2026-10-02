@@ -37,7 +37,7 @@ This refines step 8's watcher.
 
 ### Parsing
 
-- Parse on one background thread with `parse_markdown(text)`, 80 ms after the last change. The desktop uses the same delay (`parse_due` in `crates/gtk/src/ui.rs`).
+- Parse on one background thread with `parse_markdown(text)`, 80 ms after the last change. The spans to place and the syntax to hide are worked out on that thread too, leaving the main thread only the diff. The desktop uses the same delay (`parse_due` in `crates/gtk/src/ui.rs`).
 - Coalesce requests: while a parse runs, keep only the newest one.
 - Tag each request with a generation number, and apply a result only if the text hasn't changed since.
 - Until the new result arrives, remove the hidden spans on the line being edited, as `text_changed` does on the desktop, so syntax doesn't flicker.
