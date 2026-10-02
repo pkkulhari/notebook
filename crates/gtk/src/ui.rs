@@ -1,7 +1,6 @@
 use gtk::{gdk, gio, glib, pango, prelude::*};
-use loro::{ContainerTrait, ExportMode, LoroDoc, LoroText, TextDelta, UndoManager, VersionVector};
 use notebook_core::{
-    crdt,
+    editor::{Applied, Draft, Drafts, OutOfSync, TextEdit},
     markdown::{self, Document},
     model::*,
     storage::{self, Command, Event, Mutation},
@@ -11,41 +10,16 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
-    sync::{
-        Arc, Mutex,
-        mpsc::{self, Receiver, Sender},
-    },
+    sync::mpsc::{self, Receiver, Sender},
     time::{Duration, Instant},
 };
 
-/// Typing within this many milliseconds of the last edit undoes together.
-const UNDO_MERGE_MS: i64 = 500;
-const TYPING: &str = "typing";
-
-type TextChanges = Arc<Mutex<Vec<Vec<TextDelta>>>>;
-
-struct Draft {
-    note: Note,
+/// The buffer showing an open draft. It mirrors the draft's text: typing is
+/// written into the draft, and the draft's imports and undos into the buffer.
+struct Page {
     buffer: gtk::TextBuffer,
-    /// The editor's copy of the note. The buffer mirrors its text: typing is
-    /// written into it, and its imports and undos are written into the buffer.
-    doc: LoroDoc,
-    /// Undoes only this device's edits, even after others' edits arrive.
-    undo: UndoManager,
-    /// Text changes from imports and undo, waiting to reach the buffer.
-    incoming: TextChanges,
-    _subscription: loro::Subscription,
-    /// The version storage has confirmed saving, and the versions of saves
-    /// still in flight, by sequence.
-    acked: VersionVector,
-    in_flight: Vec<(u64, VersionVector)>,
-    sequence: u64,
-    saved: u64,
-    queued: u64,
-    changed: Instant,
-    last_queued: Instant,
-    last_opened: Instant,
-    created: bool,
+    /// The buffer's text as of its last change.
+    body: String,
 }
 
 struct State {
@@ -53,7 +27,8 @@ struct State {
     notebooks: Vec<Notebook>,
     notes: Vec<NoteSummary>,
     counts: NoteCounts,
-    drafts: HashMap<String, Draft>,
+    drafts: Drafts,
+    pages: HashMap<String, Page>,
     active: Option<String>,
     filter: Filter,
     list_generation: u64,
@@ -130,8 +105,6 @@ pub(crate) struct Ui {
     sync_button: gtk::Button,
     sync_dialog: RefCell<Option<SyncDialog>>,
     updating: Cell<bool>,
-    /// This window's writer identity in every note it edits.
-    peer: u64,
     /// The buffer is being changed from its document, not by typing.
     from_doc: Cell<bool>,
     allow_close: Cell<bool>,
@@ -506,7 +479,6 @@ fn build(
         parse_requests,
         parse_results,
         updating: Cell::new(false),
-        peer: crdt::random_peer(),
         from_doc: Cell::new(false),
         allow_close: Cell::new(false),
         search_due: Cell::new(None),
@@ -517,7 +489,8 @@ fn build(
             notebooks: vec![],
             notes: vec![],
             counts: NoteCounts::new(),
-            drafts: HashMap::new(),
+            drafts: Drafts::new(),
+            pages: HashMap::new(),
             active: None,
             filter: Filter::Notebook(DEFAULT_NOTEBOOK.into()),
             list_generation: 0,
@@ -784,11 +757,9 @@ impl Ui {
                 ui.error_box.set_visible(false);
                 for command in failed {
                     if let Command::Edit { id, .. } = command {
-                        // Resend everything since the last confirmed save, which
-                        // includes the failed edits and any made after them.
-                        let mut s = ui.state.borrow_mut();
-                        if let Some(d) = s.drafts.get_mut(&id) {
-                            ui.send(edit_command(&id, d));
+                        let resend = ui.state.borrow_mut().drafts.resend(&id);
+                        if let Some(command) = resend {
+                            ui.send(command);
                         }
                     } else {
                         ui.send(command);
@@ -965,31 +936,34 @@ impl Ui {
 
     fn update_location(self: &Rc<Self>) {
         let s = self.state.borrow();
-        let draft = s.active.as_ref().and_then(|id| s.drafts.get(id));
+        let note = s
+            .active
+            .as_ref()
+            .and_then(|id| s.drafts.get(id))
+            .map(Draft::note);
         self.location
-            .set_sensitive(draft.is_some_and(|d| !d.note.deleted));
-        self.trash_button.set_sensitive(draft.is_some());
-        let Some(draft) = draft else {
+            .set_sensitive(note.is_some_and(|n| !n.deleted));
+        self.trash_button.set_sensitive(note.is_some());
+        let Some(note) = note else {
             return;
         };
         self.location.set_label(
             &s.notebooks
                 .iter()
-                .find(|b| b.id == draft.note.notebook_id)
+                .find(|b| b.id == note.notebook_id)
                 .map(|b| b.name.clone())
                 .unwrap_or_else(|| "Default".into()),
         );
-        self.trash_button.set_icon_name(if draft.note.deleted {
+        self.trash_button.set_icon_name(if note.deleted {
             "edit-undo-symbolic"
         } else {
             "user-trash-symbolic"
         });
-        self.trash_button
-            .set_tooltip_text(Some(if draft.note.deleted {
-                "Restore note"
-            } else {
-                "Move note to Trash"
-            }));
+        self.trash_button.set_tooltip_text(Some(if note.deleted {
+            "Restore note"
+        } else {
+            "Move note to Trash"
+        }));
         let popover = gtk::Popover::new();
         let choices = gtk::Box::new(gtk::Orientation::Vertical, 2);
         let caption = gtk::Label::new(Some("Move to notebook"));
@@ -1024,57 +998,39 @@ impl Ui {
     }
 
     /// A new note passes an empty `snapshot`.
-    fn install_draft(self: &Rc<Self>, mut note: Note, created: bool, snapshot: &[u8]) {
-        let doc = LoroDoc::from_snapshot(snapshot).unwrap_or_else(|_| LoroDoc::new());
-        // Set before any edit and before the undo manager binds to the peer.
-        let _ = doc.set_peer_id(self.peer);
-        let text = crdt::text(&doc);
-        note.body = text.to_string();
-        let mut undo = UndoManager::new(&doc);
-        undo.set_max_undo_steps(500);
-        undo.set_merge_interval(UNDO_MERGE_MS);
-        let incoming = TextChanges::default();
-        let queue = incoming.clone();
-        let subscription = doc.subscribe(
-            &text.id(),
-            Arc::new(move |event| {
-                // The buffer already shows what was typed into it.
-                if event.origin == TYPING {
-                    return;
-                }
-                let mut queue = queue.lock().unwrap();
-                for diff in event.events {
-                    if let loro::event::Diff::Text(delta) = diff.diff {
-                        queue.push(delta);
-                    }
-                }
-            }),
-        );
+    fn install_draft(self: &Rc<Self>, note: Note, created: bool, snapshot: &[u8]) {
+        let id = note.id.clone();
+        let body = self
+            .state
+            .borrow_mut()
+            .drafts
+            .open(note, snapshot, created)
+            .text();
         let buffer = gtk::TextBuffer::new(None::<&gtk::TextTagTable>);
         configure_tags(&buffer);
-        buffer.set_text(&note.body);
+        buffer.set_text(&body);
         buffer.set_enable_undo(false);
-        let (weak, id) = (Rc::downgrade(self), note.id.clone());
+        let (weak, page) = (Rc::downgrade(self), id.clone());
         buffer.connect_insert_text(move |_, at, inserted| {
             if let Some(ui) = weak.upgrade() {
-                ui.mirror_typing(&id, |text| text.insert(at.offset() as usize, inserted));
+                ui.mirror_typing(&page, |d| d.insert(at.offset() as usize, inserted));
             }
         });
-        let (weak, id) = (Rc::downgrade(self), note.id.clone());
+        let (weak, page) = (Rc::downgrade(self), id.clone());
         buffer.connect_delete_range(move |_, start, end| {
             let (start, end) = (start.offset() as usize, end.offset() as usize);
             if end > start
                 && let Some(ui) = weak.upgrade()
             {
-                ui.mirror_typing(&id, |text| text.delete(start, end - start));
+                ui.mirror_typing(&page, |d| d.delete(start, end - start));
             }
         });
-        let (weak, id) = (Rc::downgrade(self), note.id.clone());
+        let (weak, page) = (Rc::downgrade(self), id.clone());
         buffer.connect_changed(move |buffer| {
             if let Some(ui) = weak.upgrade()
                 && !ui.from_doc.get()
             {
-                ui.text_changed(&id, buffer);
+                ui.text_changed(&page, buffer);
             }
         });
         let weak = Rc::downgrade(self);
@@ -1087,26 +1043,10 @@ impl Ui {
                 ui.update_hidden();
             }
         });
-        self.state.borrow_mut().drafts.insert(
-            note.id.clone(),
-            Draft {
-                note,
-                buffer,
-                acked: doc.oplog_vv(),
-                in_flight: vec![],
-                doc,
-                undo,
-                incoming,
-                _subscription: subscription,
-                sequence: 0,
-                saved: 0,
-                queued: 0,
-                changed: Instant::now(),
-                last_queued: Instant::now(),
-                last_opened: Instant::now(),
-                created,
-            },
-        );
+        self.state
+            .borrow_mut()
+            .pages
+            .insert(id, Page { buffer, body });
     }
 
     fn display_note(self: &Rc<Self>, id: &str, cursor: Option<i32>) {
@@ -1118,8 +1058,9 @@ impl Ui {
             s.parse_due = Some(Instant::now());
             s.document = Document::default();
             let d = s.drafts.get_mut(id).expect("loaded draft");
-            d.last_opened = Instant::now();
-            (d.buffer.clone(), !d.note.deleted)
+            d.touch();
+            let editable = !d.note().deleted;
+            (s.pages[id].buffer.clone(), editable)
         };
         self.editor.set_buffer(Some(&buffer));
         self.update_writing_margins();
@@ -1166,26 +1107,9 @@ impl Ui {
 
     fn trim_cache(&self) {
         let mut s = self.state.borrow_mut();
-        let excess = s.drafts.len().saturating_sub(12);
-        if excess == 0 {
-            return;
-        }
-        let mut candidates: Vec<_> = s
-            .drafts
-            .iter()
-            .filter(|(id, d)| {
-                s.active.as_ref() != Some(id)
-                    && d.created
-                    && d.sequence == d.saved
-                    // Reopening reuses this window's writer identity, so every
-                    // edit it made must already be saved.
-                    && d.doc.oplog_vv().get(&self.peer) == d.acked.get(&self.peer)
-            })
-            .map(|(id, d)| (d.last_opened, id.clone()))
-            .collect();
-        candidates.sort();
-        for (_, id) in candidates.into_iter().take(excess) {
-            s.drafts.remove(&id);
+        let s = &mut *s;
+        for id in s.drafts.trim(s.active.as_deref()) {
+            s.pages.remove(&id);
         }
     }
 
@@ -1194,7 +1118,7 @@ impl Ui {
         let (cached, generation) = {
             let mut s = self.state.borrow_mut();
             s.load_generation += 1;
-            (s.drafts.contains_key(id), s.load_generation)
+            (s.drafts.get(id).is_some(), s.load_generation)
         };
         if cached {
             self.display_note(id, None);
@@ -1229,55 +1153,51 @@ impl Ui {
     fn trash_or_restore(&self) {
         self.flush_drafts();
         let s = self.state.borrow();
-        if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
-            self.send(Command::Mutate(if d.note.deleted {
+        if let Some(note) = s
+            .active
+            .as_ref()
+            .and_then(|id| s.drafts.get(id))
+            .map(Draft::note)
+        {
+            self.send(Command::Mutate(if note.deleted {
                 Mutation::Restore {
-                    id: d.note.id.clone(),
+                    id: note.id.clone(),
                 }
             } else {
                 Mutation::Trash {
-                    id: d.note.id.clone(),
+                    id: note.id.clone(),
                 }
             }));
         }
     }
 
     fn flush_drafts(&self) {
-        let mut s = self.state.borrow_mut();
-        for (id, draft) in &mut s.drafts {
-            if draft.sequence > draft.queued {
-                self.send(edit_command(id, draft));
-            }
+        let commands = self.state.borrow_mut().drafts.flush();
+        for command in commands {
+            self.send(command);
         }
     }
 
     /// Runs before GTK applies the edit, while the offsets still describe the
     /// text both sides share.
-    fn mirror_typing(&self, id: &str, edit: impl FnOnce(&LoroText) -> loro::LoroResult<()>) {
+    fn mirror_typing(&self, id: &str, edit: impl FnOnce(&mut Draft) -> Result<(), OutOfSync>) {
         if self.from_doc.get() {
             return;
         }
-        let mut s = self.state.borrow_mut();
-        let Some(d) = s.drafts.get_mut(id) else {
-            return;
-        };
-        if edit(&crdt::text(&d.doc)).is_ok() {
-            d.doc.set_next_commit_origin(TYPING);
-            d.doc.commit();
-            d.sequence += 1;
-            d.changed = Instant::now();
+        if let Some(d) = self.state.borrow_mut().drafts.get_mut(id) {
+            let _ = edit(d);
         }
     }
 
     fn text_changed(&self, id: &str, buffer: &gtk::TextBuffer) {
         let mut s = self.state.borrow_mut();
-        let Some(draft) = s.drafts.get_mut(id) else {
+        let Some(page) = s.pages.get_mut(id) else {
             return;
         };
-        draft.note.body = buffer
+        page.body = buffer
             .text(&buffer.start_iter(), &buffer.end_iter(), true)
             .to_string();
-        let empty = draft.note.body.is_empty();
+        let empty = page.body.is_empty();
         if s.active.as_deref() == Some(id) {
             self.placeholder.set_visible(empty);
             s.parse_generation += 1;
@@ -1294,43 +1214,29 @@ impl Ui {
         guard_buffer_end(buffer);
     }
 
-    /// Writes changes queued by a document import or undo into its buffer.
+    /// Writes a draft's changes from an import or undo into its buffer.
     /// Returns the offset just after the last change.
-    fn apply_incoming(
-        &self,
-        id: &str,
-        buffer: &gtk::TextBuffer,
-        incoming: &TextChanges,
-    ) -> Option<i32> {
-        let deltas = std::mem::take(&mut *incoming.lock().unwrap());
-        if deltas.is_empty() {
+    fn apply_incoming(&self, id: &str, buffer: &gtk::TextBuffer, applied: Applied) -> Option<i32> {
+        if applied.edits.is_empty() {
             return None;
         }
         self.from_doc.set(true);
-        let mut last = None;
-        for delta in deltas {
-            let mut offset = 0;
-            for item in delta {
-                match item {
-                    TextDelta::Retain { retain, .. } => offset += retain as i32,
-                    TextDelta::Insert { insert, .. } => {
-                        buffer.insert(&mut buffer.iter_at_offset(offset), &insert);
-                        offset += insert.chars().count() as i32;
-                        last = Some(offset);
-                    }
-                    TextDelta::Delete { delete } => {
-                        buffer.delete(
-                            &mut buffer.iter_at_offset(offset),
-                            &mut buffer.iter_at_offset(offset + delete as i32),
-                        );
-                        last = Some(offset);
-                    }
+        for edit in applied.edits {
+            match edit {
+                TextEdit::Insert { at, text } => {
+                    buffer.insert(&mut buffer.iter_at_offset(at as i32), &text);
+                }
+                TextEdit::Delete { at, len } => {
+                    buffer.delete(
+                        &mut buffer.iter_at_offset(at as i32),
+                        &mut buffer.iter_at_offset((at + len) as i32),
+                    );
                 }
             }
         }
         self.from_doc.set(false);
         self.text_changed(id, buffer);
-        last
+        applied.cursor.map(|cursor| cursor as i32)
     }
 
     fn undo_redo(&self, undo: bool) {
@@ -1339,24 +1245,20 @@ impl Ui {
         }
         let target = {
             let mut s = self.state.borrow_mut();
+            let s = &mut *s;
             let Some(id) = s.active.clone() else {
                 return;
             };
             let Some(d) = s.drafts.get_mut(&id) else {
                 return;
             };
-            let done = if undo { d.undo.undo() } else { d.undo.redo() };
-            if !done.unwrap_or(false) {
+            let Some(applied) = (if undo { d.undo() } else { d.redo() }) else {
                 return;
-            }
-            // Undo can record edits that leave the text as it was; they still
-            // need saving.
-            d.sequence += 1;
-            d.changed = Instant::now();
-            Some((id, d.buffer.clone(), d.incoming.clone()))
+            };
+            Some((s.pages[&id].buffer.clone(), id, applied))
         };
-        if let Some((id, buffer, incoming)) = target
-            && let Some(offset) = self.apply_incoming(&id, &buffer, &incoming)
+        if let Some((buffer, id, applied)) = target
+            && let Some(offset) = self.apply_incoming(&id, &buffer, applied)
         {
             buffer.place_cursor(&buffer.iter_at_offset(offset));
             self.editor.scroll_mark_onscreen(&buffer.get_insert());
@@ -1380,8 +1282,8 @@ impl Ui {
 
     fn update_word_count(&self) {
         let s = self.state.borrow();
-        if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
-            let count = d.note.body.split_whitespace().count();
+        if let Some(page) = s.active.as_ref().and_then(|id| s.pages.get(id)) {
+            let count = page.body.split_whitespace().count();
             self.words.set_text(&format!(
                 "{count} {}",
                 if count == 1 { "word" } else { "words" }
@@ -1586,20 +1488,15 @@ impl Ui {
         }
         {
             let mut s = self.state.borrow_mut();
-            for (id, d) in &mut s.drafts {
-                if d.sequence > d.queued
-                    && (now.duration_since(d.changed) >= Duration::from_millis(300)
-                        || now.duration_since(d.last_queued) >= Duration::from_secs(2))
-                {
-                    self.send(edit_command(id, d));
-                }
+            for command in s.drafts.due(now) {
+                self.send(command);
             }
             if s.parse_due.is_some_and(|due| due <= now) {
                 s.parse_due = None;
-                if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
+                if let Some(page) = s.active.as_ref().and_then(|id| s.pages.get(id)) {
                     let _ = self
                         .parse_requests
-                        .send((s.parse_generation, d.note.body.clone()));
+                        .send((s.parse_generation, page.body.clone()));
                 }
             }
         }
@@ -1678,7 +1575,7 @@ impl Ui {
                         .as_ref()
                         .filter(|id| {
                             s.filter != Filter::Trash
-                                && s.drafts.get(*id).is_some_and(|d| d.note.deleted)
+                                && s.drafts.get(id).is_some_and(|d| d.note().deleted)
                         })
                         .and_then(|id| s.notes.iter().position(|n| &n.id == id))
                         .unwrap_or(0);
@@ -1760,23 +1657,14 @@ impl Ui {
                 }
             }
             Event::Created(id) => {
-                if let Some(d) = self.state.borrow_mut().drafts.get_mut(&id) {
-                    d.created = true;
-                }
+                self.state.borrow_mut().drafts.created(&id);
                 self.request_list();
                 self.update_word_count();
             }
             Event::Saved { id, sequence } => {
                 {
                     let mut s = self.state.borrow_mut();
-                    if let Some(d) = s.drafts.get_mut(&id) {
-                        d.saved = d.saved.max(sequence);
-                        if let Some(done) = d.in_flight.iter().position(|(seq, _)| *seq == sequence)
-                        {
-                            d.acked = d.in_flight[done].1.clone();
-                            d.in_flight.drain(..=done);
-                        }
-                    }
+                    s.drafts.saved(&id, sequence);
                     s.failed.retain(|c| !matches!(c, Command::Edit { id: failed_id, sequence: failed_seq, .. } if failed_id == &id && *failed_seq <= sequence));
                     if s.failed.is_empty() {
                         self.error_box.set_visible(false);
@@ -1796,12 +1684,12 @@ impl Ui {
                     match mutation {
                         Mutation::Move { id, notebook_id } => {
                             if let Some(d) = s.drafts.get_mut(&id) {
-                                d.note.notebook_id = notebook_id;
+                                d.note_mut().notebook_id = notebook_id;
                             }
                         }
                         Mutation::Trash { id } => {
                             if let Some(d) = s.drafts.get_mut(&id) {
-                                d.note.deleted = true;
+                                d.note_mut().deleted = true;
                             }
                             if s.active.as_ref() == Some(&id) && s.filter != Filter::Trash {
                                 s.select_first = true;
@@ -1810,14 +1698,14 @@ impl Ui {
                         }
                         Mutation::Restore { id } => {
                             if let Some(d) = s.drafts.get_mut(&id) {
-                                d.note.deleted = false;
+                                d.note_mut().deleted = false;
                             }
                         }
                         Mutation::DeleteNotebook { id } => {
                             let default_id = s.default_notebook_id.clone();
-                            for d in s.drafts.values_mut() {
-                                if d.note.notebook_id == id {
-                                    d.note.notebook_id = default_id.clone();
+                            for d in s.drafts.iter_mut() {
+                                if d.note().notebook_id == id {
+                                    d.note_mut().notebook_id = default_id.clone();
                                 }
                             }
                         }
@@ -1825,7 +1713,7 @@ impl Ui {
                     }
                     s.leave_missing_notebook();
                     if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
-                        self.editor.set_editable(!d.note.deleted);
+                        self.editor.set_editable(!d.note().deleted);
                     }
                 }
                 self.rebuild_sidebar();
@@ -1833,20 +1721,18 @@ impl Ui {
                 self.update_word_count();
             }
             Event::NoteDelta { id, delta } => {
-                let target = self
-                    .state
-                    .borrow()
-                    .drafts
-                    .get(&id)
-                    .map(|d| (d.doc.clone(), d.buffer.clone(), d.incoming.clone()));
-                if let Some((doc, buffer, incoming)) = target {
-                    if doc.import(&delta).is_err() {
-                        incoming.lock().unwrap().clear();
-                    } else if self.apply_incoming(&id, &buffer, &incoming).is_some()
-                        && self.state.borrow().active.as_deref() == Some(&id)
-                    {
-                        self.update_word_count();
-                    }
+                let target = {
+                    let mut s = self.state.borrow_mut();
+                    let s = &mut *s;
+                    s.drafts
+                        .get_mut(&id)
+                        .map(|d| (d.import(&delta), s.pages[&id].buffer.clone()))
+                };
+                if let Some((applied, buffer)) = target
+                    && self.apply_incoming(&id, &buffer, applied).is_some()
+                    && self.state.borrow().active.as_deref() == Some(&id)
+                {
+                    self.update_word_count();
                 }
             }
             Event::Remote { notes, notebooks } => {
@@ -1862,9 +1748,9 @@ impl Ui {
                             && s.filter != Filter::Trash
                             && note.deleted;
                         if let Some(d) = s.drafts.get_mut(&note.id) {
-                            let was_deleted = d.note.deleted;
-                            d.note.notebook_id = note.notebook_id;
-                            d.note.deleted = note.deleted;
+                            let was_deleted = d.note().deleted;
+                            d.note_mut().notebook_id = note.notebook_id;
+                            d.note_mut().deleted = note.deleted;
                             if trashed_here && !was_deleted {
                                 s.select_first = true;
                                 s.load_generation += 1;
@@ -1872,7 +1758,7 @@ impl Ui {
                         }
                     }
                     if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
-                        self.editor.set_editable(!d.note.deleted);
+                        self.editor.set_editable(!d.note().deleted);
                     }
                 }
                 if books_changed {
@@ -2393,22 +2279,6 @@ fn wrapped_label(text: &str, class: &str) -> gtk::Label {
     label
 }
 
-/// Saves every edit the draft has made since storage last confirmed a save.
-fn edit_command(id: &str, d: &mut Draft) -> Command {
-    let updates = d
-        .doc
-        .export(ExportMode::updates(&d.acked))
-        .unwrap_or_default();
-    d.in_flight.push((d.sequence, d.doc.oplog_vv()));
-    d.queued = d.sequence;
-    d.last_queued = Instant::now();
-    Command::Edit {
-        id: id.into(),
-        updates: vec![updates],
-        sequence: d.sequence,
-    }
-}
-
 fn failure_key(command: &Command) -> String {
     match command {
         Command::Edit { id, .. } => format!("save:{id}"),
@@ -2515,6 +2385,11 @@ fn guard_buffer_end(buffer: &gtk::TextBuffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notebook_core::{crdt, editor::UNDO_MERGE_MS};
+
+    fn draft<'a>(ui: &'a Ui, id: &str) -> std::cell::Ref<'a, Draft> {
+        std::cell::Ref::map(ui.state.borrow(), |s| s.drafts.get(id).unwrap())
+    }
 
     #[test]
     fn dates_use_calendar_days_and_include_older_years() {
@@ -2586,10 +2461,7 @@ mod tests {
         pump_until(|| ui.state.borrow().ready && ui.editor.has_focus());
         assert!(ui.placeholder.is_visible());
         let first = ui.state.borrow().active.clone().unwrap();
-        assert_eq!(
-            ui.state.borrow().drafts[&first].note.notebook_id,
-            DEFAULT_NOTEBOOK
-        );
+        assert_eq!(draft(&ui, &first).note().notebook_id, DEFAULT_NOTEBOOK);
         assert!(
             ui.editor
                 .buffer()
@@ -2607,7 +2479,7 @@ mod tests {
         buffer.end_user_action();
         assert!(!ui.placeholder.is_visible());
         pump_until(|| {
-            ui.state.borrow().drafts[&first].saved > 0
+            !draft(&ui, &first).has_unsaved()
                 && ui.state.borrow().parsed_generation == ui.state.borrow().parse_generation
                 && ui
                     .state
@@ -2665,10 +2537,7 @@ mod tests {
 
         // Another device edits the open note: the text arrives in place, the
         // cursor stays put, and undo leaves the other device's edit alone.
-        pump_until(|| {
-            let s = ui.state.borrow();
-            s.drafts[&first].saved == s.drafts[&first].sequence
-        });
+        pump_until(|| !draft(&ui, &first).has_unsaved());
         let reader = storage::open_reader(&path).unwrap();
         let mut other = storage::Repository::open(&dir.path().join("other.db")).unwrap();
         let shared = storage::export_since(&reader, &first, None)
@@ -2703,10 +2572,7 @@ mod tests {
         assert!(text().starts_with("> From the laptop\n"));
         assert!(text().ends_with("Last line!"));
         gtk::prelude::WidgetExt::activate_action(&ui.window, "win.redo", None).unwrap();
-        pump_until(|| {
-            let s = ui.state.borrow();
-            s.drafts[&first].saved == s.drafts[&first].sequence
-        });
+        pump_until(|| !draft(&ui, &first).has_unsaved());
         let merged = storage::Repository::open(&path)
             .unwrap()
             .load(&first)
@@ -2771,8 +2637,8 @@ mod tests {
             ui.state
                 .borrow()
                 .drafts
-                .values()
-                .all(|d| d.sequence == d.saved && d.created)
+                .iter()
+                .all(|d| !d.has_unsaved() && d.is_created())
         });
 
         // Hover-driven selection must not replace the note being edited.
@@ -2838,11 +2704,7 @@ mod tests {
         assert!(ui.error_box.is_visible());
         inspection.execute_batch("DROP TRIGGER fail_save").unwrap();
         ui.retry.emit_clicked();
-        pump_until(|| {
-            ui.state.borrow().failed.is_empty()
-                && ui.state.borrow().drafts[&second].saved
-                    == ui.state.borrow().drafts[&second].sequence
-        });
+        pump_until(|| ui.state.borrow().failed.is_empty() && !draft(&ui, &second).has_unsaved());
         let stored: String = inspection
             .query_row("SELECT body FROM notes WHERE id=?1", [&second], |r| {
                 r.get(0)

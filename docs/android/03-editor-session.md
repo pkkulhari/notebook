@@ -1,6 +1,6 @@
 # 3. Move the editor session into core
 
-**Status:** Not started
+**Status:** Done
 **Needs:** step 2
 **Behaviour change:** none on desktop
 
@@ -49,23 +49,29 @@ pub struct Applied {
     pub cursor: Option<usize>,
 }
 
+/// A position outside the draft's text.
+pub struct OutOfSync;
+
 pub struct Draft { /* note, doc, undo, incoming, subscription, acked,
                      in_flight, sequence, saved, queued, changed,
                      last_queued, last_opened, created */ }
 
 impl Draft {
-    pub fn note(&self) -> &Note;            // id, notebook_id, deleted
+    pub fn note(&self) -> &Note;            // id, notebook_id, deleted; body is left empty
     pub fn note_mut(&mut self) -> &mut Note;
     pub fn text(&self) -> String;
+    pub fn is_created(&self) -> bool;
+    pub fn touch(&mut self);                 // the UI showed it; trim closes it last
 
-    // Typing: the UI's text already shows these changes.
-    pub fn insert(&mut self, at: usize, text: &str);
-    pub fn delete(&mut self, at: usize, len: usize);
+    // Typing: the UI's text already shows these changes. A position past the
+    // end returns OutOfSync and changes nothing.
+    pub fn insert(&mut self, at: usize, text: &str) -> Result<(), OutOfSync>;
+    pub fn delete(&mut self, at: usize, len: usize) -> Result<(), OutOfSync>;
     /// Replaces `len` characters at `at`, recording only the part that
     /// actually differs. Android keyboards rewrite the whole word they're
     /// composing on every keystroke; trimming the common prefix and suffix
     /// keeps edits small and merges with other devices clean.
-    pub fn replace(&mut self, at: usize, len: usize, text: &str);
+    pub fn replace(&mut self, at: usize, len: usize, text: &str) -> Result<(), OutOfSync>;
 
     // Changes coming from the document: the UI must apply `edits`.
     pub fn undo(&mut self) -> Option<Applied>;   // None if nothing to undo
@@ -83,6 +89,8 @@ impl Drafts {
     pub fn open(&mut self, note: Note, snapshot: &[u8], created: bool) -> &mut Draft;
     pub fn get(&self, id: &str) -> Option<&Draft>;
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Draft>;
+    pub fn iter(&self) -> impl Iterator<Item = &Draft>;
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Draft>;
 
     /// Edit commands for drafts whose save is due at `now`.
     pub fn due(&mut self, now: Instant) -> Vec<Command>;
@@ -95,7 +103,8 @@ impl Drafts {
     pub fn saved(&mut self, id: &str, sequence: u64);
     /// A command that resends everything since the last confirmed save.
     pub fn resend(&mut self, id: &str) -> Option<Command>;
-    pub fn trim(&mut self, active: Option<&str>);
+    /// Returns the IDs it closed, so the UI can drop their text widgets.
+    pub fn trim(&mut self, active: Option<&str>) -> Vec<String>;
 }
 ```
 
@@ -108,16 +117,16 @@ Notes on the API:
 
 ## GTK migration
 
-- `Ui` holds `drafts: RefCell<Drafts>` instead of `State::drafts: HashMap<String, Draft>`. It keeps a separate `HashMap<String, gtk::TextBuffer>` for the buffers.
+- `State` holds `drafts: Drafts` instead of `HashMap<String, Draft>`, plus `pages: HashMap<String, Page>` for each draft's buffer and its text as of the last change (used for the word count, the placeholder and parsing).
 - `mirror_typing` calls `draft.insert` or `draft.delete`.
 - `apply_incoming(buffer, applied)` applies each `TextEdit` inside the `from_doc` guard, then calls `text_changed`.
 - `tick` sends `drafts.due(now)`. `flush_drafts` sends `drafts.flush()`.
 - `Event::Saved`, `Event::Created`, the retry button and `trim_cache` call the matching `Drafts` methods.
 - `ui.rs` should no longer import `loro` at all. That's a quick check that nothing was missed.
 
-## Tests (in `crates/core`)
+## Tests (in `crates/core/src/editor.rs`)
 
-Use a real `Repository` in a temp directory, as `crates/core/tests/storage.rs` does.
+Use a real `Repository` in a temp directory, as `crates/core/tests/storage.rs` does. The tests are unit tests, so the timing tests can set a draft's private timestamps instead of sleeping.
 
 1. Type, then call `due` after a 300 ms pause. `Repository::edit` with the resulting command stores the same text.
 2. Type continuously with gaps under 300 ms. A save still falls due every 2 s.
@@ -128,8 +137,16 @@ Use a real `Repository` in a temp directory, as `crates/core/tests/storage.rs` d
 7. `replace` of a composing word ("hel" → "hell") records a single one-character insert.
 8. `trim` never evicts a draft with unacknowledged local edits, or the active draft.
 
-The existing GTK tests (`desktop_workflow`, `sync_with_another_device` and `deletion_navigation`) must still pass unchanged.
+The GTK `desktop_workflow` test must still pass. It covers editing beside another device and navigating after deletion.
 
 ## Notes
 
-_Anything surprising goes here._
+- **The API grew a little.** Typing returns `Result<(), OutOfSync>`, which step 6 maps to `CoreError::OutOfSync`. `trim` returns the closed IDs, and `touch`, `is_created`, `iter` and `iter_mut` replace direct field access. GTK still ignores typing errors, as it did before.
+- **`Draft::note().body` is always empty.** The text lives in the document, and a cached copy would go stale. GTK keeps its own copy in `Page`, read from the buffer exactly as before.
+- **Every `NoteDelta` must be imported, including storage's echo of the draft's own saves.**
+  - Each save makes storage add a metadata change (`updated_at`) of its own. A later delta depends on that change.
+  - If a draft skips an echo, Loro holds the later imports as pending: no error, and no edits. The first version of the remote-edit test did exactly this.
+  - Kotlin must import every `NoteDelta` for an open or cached note, in order (step 8). An echo returns no edits.
+- **GTK tests:** `desktop_workflow`'s assertions are unchanged. Only its reads of draft internals now go through accessors: `saved == sequence` became `!has_unsaved()`, and `UNDO_MERGE_MS` comes from `notebook_core::editor`. The other two tests named in the original plan never existed as separate tests; `desktop_workflow` covers both scenarios.
+- **`loro`** is now a dependency of `notebook-core` only. `ui.rs` no longer imports it, or `crdt` outside its tests.
+- **Results:** `ui.rs` lost about 140 lines. `cargo test` passes with 9 new editor tests (42 passed, 4 ignored), and `desktop_workflow` passes under Xvfb. The core still builds for arm64 Android.

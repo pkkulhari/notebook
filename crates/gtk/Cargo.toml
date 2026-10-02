@@ -20,7 +20,6 @@ assets = [
 
 [dependencies]
 gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
-loro.workspace = true
 notebook-core.workspace = true
 uuid.workspace = true
 

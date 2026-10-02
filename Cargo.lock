@@ -2742,7 +2742,6 @@ name = "notebook"
 version = "0.2.0"
 dependencies = [
  "gtk4",
- "loro",
  "notebook-core",
  "rusqlite",
  "tempfile",

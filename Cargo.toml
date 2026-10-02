@@ -11,7 +11,6 @@ license = "MIT"
 
 [workspace.dependencies]
 notebook-core = { path = "crates/core" }
-loro = "1.16"
 rusqlite = { version = "0.38", features = ["bundled"] }
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
