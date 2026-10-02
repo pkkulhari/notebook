@@ -1,5 +1,5 @@
 //! Run with `cargo run --release --example benchmark`.
-use notebook_core::{markdown, model::*, storage::Repository};
+use notebook_core::{editor::Drafts, markdown, model::*, storage::Repository};
 use std::time::Instant;
 
 fn main() {
@@ -52,6 +52,22 @@ fn main() {
     println!(
         "Markdown parse median: {:.2?}; p95: {:.2?}",
         timings[25], timings[47]
+    );
+    // Typing at the end of the large note, counted in UTF-16 as on Android.
+    let mut drafts = Drafts::new(Units::Utf16);
+    let snapshot = repo.snapshot(&note.id).unwrap().unwrap();
+    let draft = drafts.open(note.clone(), &snapshot, true);
+    let end = note.body.encode_utf16().count();
+    let mut timings = vec![];
+    for at in end..end + 1_000 {
+        let start = Instant::now();
+        draft.replace(at, 0, "x").unwrap();
+        timings.push(start.elapsed());
+    }
+    timings.sort();
+    println!(
+        "Keystroke into the large note's draft median: {:.2?}; p95: {:.2?}",
+        timings[500], timings[950]
     );
     let start = Instant::now();
     repo.save(&note.id, &(note.body + "One more thought."))

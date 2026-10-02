@@ -1,6 +1,6 @@
 # 11. Release
 
-**Status:** Not started
+**Status:** Done, except the measurements and tests that need a phone, and choosing a distribution channel
 **Needs:** steps 9 and 10
 
 ## Goal
@@ -11,15 +11,15 @@ A release APK that is measurably small and fast, signed, and tested on real devi
 
 The spike measured a Motorola Edge 50 Fusion (Android 16) with the `spike-release` library (opt-level 3, fat LTO), R8 off, and 10,000 notes. The budgets leave headroom for the real UI. Measure every release against them, and update the "Spike" column if the reference device changes.
 
-| Metric | How to measure | Spike | Budget |
-| --- | --- | --- | --- |
-| APK download size (arm64) | `apkanalyzer apk download-size` | 8.4 MB | ≤ 10 MB |
-| APK file size (arm64) | `apkanalyzer apk file-size` | 18.8 MB | ≤ 22 MB |
-| Rust `.so` size | `ls -l` on the stripped library | 16.2 MB | ≤ 18 MB |
-| Cold start to note list | `adb shell am start -W`, `TotalTime` | about 190 ms | ≤ 300 ms |
-| Keystroke to screen | GPU profiler while typing in a 50,000-character note | — | no dropped frames |
-| Open a note | Log timestamps from tap to text shown | — | < 100 ms |
-| Memory, idle in editor | `adb shell dumpsys meminfo` | not measured | set in step 8 |
+| Metric | How to measure | Spike | 0.2.0 | Budget |
+| --- | --- | --- | --- | --- |
+| APK download size (arm64) | `apkanalyzer apk download-size` | 8.4 MB | 6.5 MB | ≤ 10 MB |
+| APK file size (arm64) | `apkanalyzer apk file-size` | 18.8 MB | 15.0 MB | ≤ 22 MB |
+| Rust `.so` size | `ls -l` on the stripped library | 16.2 MB | 14.3 MB | ≤ 18 MB |
+| Cold start to note list | `adb shell am start -W`, `TotalTime` | about 190 ms | needs the phone | ≤ 300 ms |
+| Keystroke to screen | GPU profiler while typing in a 50,000-character note | — | needs the phone | no dropped frames |
+| Open a note | Log timestamps from tap to text shown | — | needs the phone | < 100 ms |
+| Memory, idle in editor | `adb shell dumpsys meminfo` | not measured | needs the phone | set after measuring |
 
 Measure only non-debuggable release builds. In the spike, a debuggable build took about twice as long to start.
 
@@ -73,4 +73,24 @@ Run before each release:
 
 ## Notes
 
-_Anything surprising goes here._
+- **R8 is on for release.** JNA refers to AWT classes Android lacks, so `rules.keep` adds `-dontwarn java.awt.**` next to the JNA, bindings and `AndroidContext` keep rules. The dex is 398 KB.
+  - An R8 build was checked on the emulator: notes, Markdown styling, the sync screen and a pairing code.
+  - `-PreleaseAbis=x86_64` builds a release an emulator can run. Release builds are otherwise arm64 only.
+- **`opt-level = "s"`** is now part of the `android` profile. Host benchmark (`crates/core/examples/benchmark.rs`, now with a typing measurement), size against speed:
+
+  | | opt-level 3 | "s" |
+  | --- | --- | --- |
+  | Markdown parse, 108 KB note (median) | 1.21 ms | 1.32 ms |
+  | Keystroke into that note's draft, UTF-16 (median) | 2.9 µs | 3.3 µs |
+  | List and search 10,000 notes | within noise | within noise |
+  | `.so` / APK download | 16.6 MB / 8.0 MB | 14.3 MB / 6.5 MB |
+
+  About 10% slower on work that takes microseconds to low milliseconds, off the frame budget, for 2.3 MB less library. Revisit if the phone shows dropped frames while typing.
+- **Version:** `versionName` comes from `[workspace.package] version` in `Cargo.toml` (0.2.0), and `versionCode` from it (200).
+- **Signing** reads `android/keystore.properties` (storeFile, storePassword, keyAlias, keyPassword), which git ignores, as it does `*.jks` and `*.keystore`. Without the file, release builds are unsigned.
+- **Resources:** `androidResources.localeFilters` keeps English only, and the template resources were removed in step 7.
+- **Not done:**
+  - `cargo bloat`: the size budget is met, so the tool wasn't installed.
+  - A baseline profile: decide once cold start is measured on the phone.
+  - A distribution channel.
+- **Test matrix so far:** all 14 instrumented tests pass on an x86_64 API 36 emulator with 16 KB pages. The arm64 phone runs are still to do, so run `connectedDebugAndroidTest` there only if its notes don't matter.

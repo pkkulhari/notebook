@@ -1,3 +1,4 @@
+import java.util.Properties
 import javax.inject.Inject
 
 plugins {
@@ -6,6 +7,29 @@ plugins {
 
 /** The Cargo workspace, one level above this Gradle project. */
 val workspaceDir: File = rootDir.parentFile
+
+/** The Linux and Android apps share the workspace's version number. */
+val workspaceVersion: String = Regex("\\[workspace\\.package][^\\[]*?\\bversion = \"([^\"]+)\"")
+    .find(File(workspaceDir, "Cargo.toml").readText())
+    ?.groupValues?.get(1)
+    ?: error("No [workspace.package] version in Cargo.toml")
+
+/** 1.2.3 is 10203, so every release counts up. */
+val versionNumber: Int = workspaceVersion.split(".").map(String::toInt).let { (major, minor, patch) ->
+    major * 10_000 + minor * 100 + patch
+}
+
+/** Release builds ship arm64 only; `-PreleaseAbis=x86_64` makes one an emulator can run. */
+val releaseAbis: List<String> = providers.gradleProperty("releaseAbis").orNull?.split(",") ?: listOf("arm64-v8a")
+
+/**
+ * The release key, from a `keystore.properties` beside this project that git
+ * ignores: storeFile, storePassword, keyAlias and keyPassword. Without it,
+ * release builds are unsigned.
+ */
+val keystore: Properties? = rootProject.file("keystore.properties").takeIf { it.exists() }?.let { file ->
+    Properties().apply { file.inputStream().use(::load) }
+}
 
 android {
     namespace = "com.pkkulhari.notebook"
@@ -20,11 +44,22 @@ android {
         applicationId = "com.pkkulhari.notebook"
         minSdk = 36
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = versionNumber
+        versionName = workspaceVersion
 
         // Runs tests against a throwaway database, never the real notes.
         testInstrumentationRunner = "com.pkkulhari.notebook.TestRunner"
+    }
+
+    signingConfigs {
+        if (keystore != null) {
+            create("release") {
+                storeFile = rootProject.file(keystore.getProperty("storeFile"))
+                storePassword = keystore.getProperty("storePassword")
+                keyAlias = keystore.getProperty("keyAlias")
+                keyPassword = keystore.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
@@ -34,13 +69,21 @@ android {
             }
         }
         release {
+            // R8 shrinks the Kotlin and JNA classes; keepRules/rules.keep
+            // keeps what JNA and the bindings find by reflection.
             optimization {
-                enable = false
+                enable = true
             }
             ndk {
-                abiFilters += "arm64-v8a"
+                abiFilters += releaseAbis
             }
+            signingConfig = signingConfigs.findByName("release")
         }
+    }
+
+    androidResources {
+        // The app is in English; this drops the platform libraries' other languages.
+        localeFilters += "en"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -156,7 +199,7 @@ androidComponents {
             workspace.set(workspaceDir.path)
             ndkDirectory.set(androidComponents.sdkComponents.ndkDirectory.map { it.asFile.path })
             profile.set(if (release) "android" else "dev")
-            abis.set(if (release) listOf("arm64-v8a") else listOf("arm64-v8a", "x86_64"))
+            abis.set(if (release) releaseAbis else listOf("arm64-v8a", "x86_64"))
             // Rust logs and panics in logcat, for debug builds only.
             features.set(if (release) emptyList() else listOf("logcat"))
             outputDirectory.set(layout.buildDirectory.dir("rustJniLibs/${variant.name}"))

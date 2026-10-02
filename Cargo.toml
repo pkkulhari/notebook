@@ -22,8 +22,11 @@ debug = 0
 strip = true
 
 # The Android app's library. Panics keep unwinding: UniFFI turns them into
-# Kotlin exceptions, and iroh's DNS resolver recovers from one.
+# Kotlin exceptions, and iroh's DNS resolver recovers from one. Optimizing for
+# size saves about 2 MB; parsing and typing were about 10% slower in a host
+# benchmark, still well within budget (docs/android/11-release.md).
 [profile.android]
 inherits = "release"
+opt-level = "s"
 lto = "fat"
 codegen-units = 1

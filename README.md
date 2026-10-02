@@ -2,6 +2,8 @@
 
 A native Linux note-taking app built with Rust and GTK4. Organize your notes into notebooks, write in Markdown, and keep everything on your computer. No account or internet connection required.
 
+An [Android app](#android) shares the same Rust core and syncs with it.
+
 ![Notebook in dark mode, showing a sample note](docs/notebook-dark.png)
 
 ## Features
@@ -97,3 +99,30 @@ Sync settings, this device's private key, and the list of paired devices are kep
 Notebook saves after a short pause in typing and at least every two seconds while you keep writing. If saving fails, it keeps your draft in memory and offers a retry. Undo history lasts for the current session.
 
 This version does not include import/export, attachments, or permanent deletion of trashed notes.
+
+## Android
+
+The Android app in `android/` uses the same Rust core for storage, Markdown, and sync, with a small Kotlin interface on top. It needs Android 16 or newer.
+
+### Build and install
+
+You'll need the Android SDK with NDK `29.0.14206865`, the Rust targets `aarch64-linux-android` and `x86_64-linux-android`, and [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk):
+
+```sh
+rustup target add aarch64-linux-android x86_64-linux-android
+cargo install cargo-ndk --locked
+cd android
+./gradlew installDebug
+```
+
+Gradle builds the Rust library and its Kotlin bindings itself; no separate `cargo` step is needed. Debug builds include arm64 and x86_64 (for the emulator). `./gradlew assembleRelease` builds an optimized, arm64-only APK. To sign it, add `android/keystore.properties` with `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`; git ignores it. `-PreleaseAbis=x86_64` builds a release for the emulator instead.
+
+`./gradlew connectedDebugAndroidTest` runs the instrumented tests against a throwaway database. Gradle uninstalls the app afterwards, notes included, so run them on an emulator or a phone whose notes you don't need.
+
+### On the phone
+
+The app works like the desktop: notebooks, search, Markdown with syntax shown in the block you're editing, list continuation, trash, and undo that only undoes your own edits. Tap the title to switch notebooks, and the notebook label above a note to move it.
+
+Notes are stored in the app's private storage (`notebook.db`) and are included in Android backups. The sync key lives in a directory Android never backs up, so a phone restored from a backup must be paired again; its notes merge with your other devices' copies without duplicating.
+
+Sync runs only while the app is open. Pair a phone with the desktop app or another phone the same way as on the desktop, on the same Wi-Fi network. Android 17 asks for permission to find devices on the local network when you turn sync on; without it, sync works only through a relay.
