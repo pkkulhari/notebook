@@ -151,14 +151,14 @@ impl Core {
         self.send(Command::Flush);
     }
 
-    /// Sends the failed commands again. A failed save resends everything
-    /// since the last confirmed one, including edits made after it.
+    /// Sends the failed commands again, then flushes. A failed save resends
+    /// everything since the last confirmed one, including edits made after it.
     pub fn retry(&self) {
         let commands = self.shared.failed.lock().unwrap().retry(&mut self.drafts());
         for command in commands {
             self.send(command);
         }
-        self.send_drafts();
+        self.flush();
     }
 
     pub fn has_failures(&self) -> bool {

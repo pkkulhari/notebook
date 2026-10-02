@@ -106,7 +106,7 @@ class Store(
     private var listGeneration = 0L
     private var loadGeneration = 0L
 
-    /** Set when the list may be out of date while it isn't showing. */
+    /** Set when the list may be out of date: it refreshes when it next shows, or on `Flushed`. */
     private var listStale = false
 
     init {
@@ -169,11 +169,12 @@ class Store(
                 val note = event.note ?: return refreshList()
                 show(note, core.openDraft(note, event.snapshot), 0, focus = false)
             }
-            is CoreEvent.Created -> refreshList()
+            // Saves come before a Flushed, which refreshes the list once.
+            is CoreEvent.Created -> listStale = true
             is CoreEvent.Saved -> {
                 if (problem?.retryable == true && !core.hasFailures()) setProblem(null)
                 core.trimDrafts(active)
-                refreshList()
+                listStale = true
             }
             is CoreEvent.Mutated -> {
                 notebooks = event.notebooks
@@ -198,7 +199,7 @@ class Store(
                 listener?.listChanged()
                 refreshList()
             }
-            is CoreEvent.Flushed -> {}
+            is CoreEvent.Flushed -> if (listStale && active == null) requestList()
             is CoreEvent.Error -> setProblem(
                 Problem(
                     if (event.operation == Operation.CHANGE) event.message
@@ -302,7 +303,6 @@ class Store(
         active = null
         listener?.closed()
         core.trimDrafts(null)
-        if (listStale) requestList()
     }
 
     /** Opens the note again from storage, when the editor and its draft disagree. */
