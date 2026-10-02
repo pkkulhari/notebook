@@ -19,14 +19,15 @@ pub struct CoreConfig {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Error)]
 pub enum CoreError {
     /// Kotlin passed a position outside the draft, or a note with no draft.
-    /// It should never happen; if it does, reload the note from storage.
-    OutOfSync { message: String },
+    /// It should never happen; if it does, reload the note from storage. The
+    /// field isn't called `message`, which clashes with `Throwable.message`.
+    OutOfSync { reason: String },
 }
 
 impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoreError::OutOfSync { message } => f.write_str(message),
+            CoreError::OutOfSync { reason } => f.write_str(reason),
         }
     }
 }

@@ -20,3 +20,10 @@ debug = 0
 
 [profile.release]
 strip = true
+
+# The Android app's library. Panics keep unwinding: UniFFI turns them into
+# Kotlin exceptions, and iroh's DNS resolver recovers from one.
+[profile.android]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

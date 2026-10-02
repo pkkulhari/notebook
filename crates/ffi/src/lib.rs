@@ -280,10 +280,10 @@ impl Core {
     ) -> Result<(), CoreError> {
         let mut drafts = self.drafts();
         let draft = drafts.get_mut(id).ok_or_else(|| CoreError::OutOfSync {
-            message: format!("No draft is open for note {id}"),
+            reason: format!("No draft is open for note {id}"),
         })?;
         edit(draft).map_err(|error| CoreError::OutOfSync {
-            message: error.to_string(),
+            reason: error.to_string(),
         })
     }
 }

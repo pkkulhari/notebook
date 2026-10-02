@@ -1,6 +1,6 @@
 # 7. Android build
 
-**Status:** Not started
+**Status:** Done, except running the smoke test on an arm64 phone
 **Needs:** step 6 (and step 1's toolchain setup)
 
 ## Goal
@@ -116,7 +116,7 @@ The app supports Android 16 (API 36) and newer. That means:
 
 - Platform APIs up to API 36 can be used without version checks, including dynamic colours, predictive back (`OnBackInvokedCallback`) and `Theme.DeviceDefault.DayNight`.
 - Release builds ship `arm64-v8a` only, which covers the phones this app targets; `x86_64` is for the emulator. Add `armeabi-v7a` only if a real 32-bit Android 16 device turns up.
-- The Rust libraries are built with `-P 36` (cargo-ndk defaults to API 21).
+- The Rust libraries are built with `-P 35`, the highest level NDK r29 ships; it only has to be at or below `minSdk` (cargo-ndk defaults to API 21).
 
 ## Done when
 
@@ -127,4 +127,17 @@ The app supports Android 16 (API 36) and newer. That means:
 
 ## Notes
 
-_Anything surprising goes here._
+- **The Rust tasks are two small task classes** in `app/build.gradle.kts`: `CargoNdkBuild` (`cargoBuildDebug`, `cargoBuildRelease`) and `UniffiBindings` (`uniffiBindings`).
+  - They're wired in with `variant.sources.jniLibs` and `variant.sources.kotlin` `.addGeneratedSourceDirectory(…)`, so AGP adds the task dependencies itself.
+  - Both work with the configuration cache, which the project has on.
+- **`CargoNdkBuild` copies only `libnotebook_ffi.so`** straight from `target/<triple>/<profile>/`, instead of using cargo-ndk's `-o`. It also sets `ANDROID_NDK_HOME` to AGP's pinned NDK.
+- **Gradle finds `cargo`** through `$CARGO`, then `~/.cargo/bin/cargo`, then `PATH`. Android Studio started from a desktop launcher often has no `~/.cargo/bin` on its `PATH`.
+- **Debug builds turn on the `logcat` feature**, and release builds don't.
+- **UniFFI pitfall:** an error variant field named `message` clashes with `Throwable.message`, and the bindings don't compile. `CoreError::OutOfSync` now has `reason`.
+- **Sizes:**
+  - Debug: unoptimized `.so` files of 42 MB (arm64) and 47 MB (x86_64), and a 92 MB APK. Expected, but slow to install.
+  - Release (`android` profile, arm64 only): a 16.6 MB `.so` and a 19.3 MB unsigned APK. The Rust build took 1 min 33 s.
+  - Every `LOAD` segment is aligned to `0x4000`, and `zipalign -c -P 16` passes.
+- **Caching:** a second `assembleDebug` with no changes marks both Rust tasks UP-TO-DATE and takes 0.4 s. Gradle compares input contents, so touching a file changes nothing.
+- **Template cleanup:** AppCompat, Material, core-ktx and Espresso are gone, as are the purple and teal colours, `values-night` and the example tests. The theme is `android:Theme.DeviceDefault.DayNight`, and the Java/Kotlin target is 17.
+- **Smoke test:** `CoreSmokeTest` passes on an x86_64 emulator (`system-images/android-36.1/google_apis_ps16k/x86_64`: API 36 with 16 KB pages). That also confirms the library loads with 16 KB pages. The arm64 phone wasn't connected for this step.
