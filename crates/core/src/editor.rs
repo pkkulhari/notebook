@@ -4,8 +4,16 @@
 //! document, and the document's imports and undos come back as [`TextEdit`]s
 //! for the UI to apply. Drafts decide when to save and what each save holds,
 //! and return storage commands for the UI to send.
-use crate::{crdt, model::Note, storage::Command};
-use loro::{ContainerTrait, ExportMode, LoroDoc, TextDelta, UndoManager, VersionVector};
+//!
+//! Every position is in the `Units` the drafts were created with.
+use crate::{
+    crdt,
+    model::{Note, Units},
+    storage::Command,
+};
+use loro::{
+    ContainerTrait, ExportMode, LoroDoc, TextDelta, UndoManager, VersionVector, cursor::PosType,
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -25,7 +33,7 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(2);
 const CACHE_LIMIT: usize = 12;
 
 /// A change the UI applies to its text widget, in order. Each position
-/// refers to the text after the previous edit.
+/// refers to the text after the previous edit, and `len` is in the same units.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextEdit {
     Insert { at: usize, text: String },
@@ -64,6 +72,7 @@ pub struct Draft {
     /// Text changes from imports and undo, waiting to reach the UI.
     incoming: Incoming,
     _subscription: loro::Subscription,
+    units: Units,
     /// The version storage has confirmed saving, and the versions of saves
     /// still in flight, by sequence.
     acked: VersionVector,
@@ -79,7 +88,7 @@ pub struct Draft {
 
 impl Draft {
     /// A new note passes an empty `snapshot`.
-    fn open(mut note: Note, snapshot: &[u8], created: bool, peer: u64) -> Self {
+    fn open(mut note: Note, snapshot: &[u8], created: bool, peer: u64, units: Units) -> Self {
         let doc = LoroDoc::from_snapshot(snapshot).unwrap_or_else(|_| LoroDoc::new());
         // Set before any edit and before the undo manager binds to the peer.
         let _ = doc.set_peer_id(peer);
@@ -113,6 +122,7 @@ impl Draft {
             undo,
             incoming,
             _subscription: subscription,
+            units,
             sequence: 0,
             saved: 0,
             queued: 0,
@@ -159,48 +169,38 @@ impl Draft {
     // Typing: the UI's text already shows these changes.
 
     pub fn insert(&mut self, at: usize, text: &str) -> Result<(), OutOfSync> {
-        let body = crdt::text(&self.doc);
-        if at > body.len_unicode() {
-            return Err(OutOfSync);
-        }
+        let at = self.char_position(at)?;
         if !text.is_empty() {
-            body.insert(at, text).map_err(|_| OutOfSync)?;
+            crdt::text(&self.doc)
+                .insert(at, text)
+                .map_err(|_| OutOfSync)?;
             self.typed();
         }
         Ok(())
     }
 
     pub fn delete(&mut self, at: usize, len: usize) -> Result<(), OutOfSync> {
-        let body = crdt::text(&self.doc);
-        if at
-            .checked_add(len)
-            .is_none_or(|end| end > body.len_unicode())
-        {
-            return Err(OutOfSync);
-        }
-        if len > 0 {
-            body.delete(at, len).map_err(|_| OutOfSync)?;
+        let (start, end) = self.char_range(at, len)?;
+        if end > start {
+            crdt::text(&self.doc)
+                .delete(start, end - start)
+                .map_err(|_| OutOfSync)?;
             self.typed();
         }
         Ok(())
     }
 
-    /// Replaces `len` characters at `at`, recording only the part that
-    /// actually differs. Android keyboards rewrite the whole word they're
-    /// composing on every keystroke; trimming the common prefix and suffix
-    /// keeps edits small and merges with other devices clean.
+    /// Replaces `len` units at `at`, recording only the part that actually
+    /// differs. Android keyboards rewrite the whole word they're composing on
+    /// every keystroke; trimming the common prefix and suffix keeps edits
+    /// small and merges with other devices clean.
     pub fn replace(&mut self, at: usize, len: usize, text: &str) -> Result<(), OutOfSync> {
+        let (start, end) = self.char_range(at, len)?;
         let body = crdt::text(&self.doc);
-        if at
-            .checked_add(len)
-            .is_none_or(|end| end > body.len_unicode())
-        {
-            return Err(OutOfSync);
-        }
-        let old: Vec<char> = if len == 0 {
+        let old: Vec<char> = if end == start {
             vec![]
         } else {
-            body.slice(at, at + len)
+            body.slice(start, end)
                 .map_err(|_| OutOfSync)?
                 .chars()
                 .collect()
@@ -219,13 +219,34 @@ impl Draft {
             return Ok(());
         }
         if removed > 0 {
-            body.delete(at + prefix, removed).map_err(|_| OutOfSync)?;
+            body.delete(start + prefix, removed)
+                .map_err(|_| OutOfSync)?;
         }
         if !inserted.is_empty() {
-            body.insert(at + prefix, &inserted).map_err(|_| OutOfSync)?;
+            body.insert(start + prefix, &inserted)
+                .map_err(|_| OutOfSync)?;
         }
         self.typed();
         Ok(())
+    }
+
+    /// The character position of `at`, which is in the draft's units.
+    fn char_position(&self, at: usize) -> Result<usize, OutOfSync> {
+        let body = crdt::text(&self.doc);
+        match self.units {
+            Units::Chars => (at <= body.len_unicode()).then_some(at),
+            Units::Utf16 => body
+                .convert_pos(at, PosType::Utf16, PosType::Unicode)
+                // A position inside a surrogate pair splits a character.
+                .filter(|&pos| body.convert_pos(pos, PosType::Unicode, PosType::Utf16) == Some(at)),
+        }
+        .ok_or(OutOfSync)
+    }
+
+    /// The character positions of `len` units at `at`.
+    fn char_range(&self, at: usize, len: usize) -> Result<(usize, usize), OutOfSync> {
+        let end = at.checked_add(len).ok_or(OutOfSync)?;
+        Ok((self.char_position(at)?, self.char_position(end)?))
     }
 
     fn typed(&mut self) {
@@ -248,6 +269,7 @@ impl Draft {
     }
 
     fn undo_or_redo(&mut self, undo: bool) -> Option<Applied> {
+        let before = self.before_change();
         let done = if undo {
             self.undo.undo()
         } else {
@@ -260,43 +282,59 @@ impl Draft {
         // need saving.
         self.sequence += 1;
         self.changed = Instant::now();
-        Some(self.take_incoming())
+        Some(self.take_incoming(before))
     }
 
     /// Imports changes from storage, such as another device's edits. A delta
     /// that can't be imported changes nothing.
     pub fn import(&mut self, delta: &[u8]) -> Applied {
+        let before = self.before_change();
         if self.doc.import(delta).is_err() {
             self.incoming.lock().unwrap().clear();
             return Applied::default();
         }
-        self.take_incoming()
+        self.take_incoming(before)
     }
 
-    /// Turns the text changes queued by an import or undo into edits.
-    fn take_incoming(&self) -> Applied {
+    /// The text as it is before an import or undo. Measuring their changes
+    /// in UTF-16 units needs it, because a deletion's characters are gone
+    /// from the document afterwards.
+    fn before_change(&self) -> Option<Vec<char>> {
+        (self.units == Units::Utf16).then(|| self.text().chars().collect())
+    }
+
+    /// Turns the text changes queued by an import or undo into edits. Loro's
+    /// deltas count characters; in UTF-16 they're measured against `before`.
+    fn take_incoming(&self, before: Option<Vec<char>>) -> Applied {
         let deltas = std::mem::take(&mut *self.incoming.lock().unwrap());
+        let mut text = before;
         let mut applied = Applied::default();
         for delta in deltas {
-            let mut offset = 0;
+            // `pos` counts characters in `text`, and `at` the draft's units.
+            let (mut pos, mut at) = (0, 0);
             for item in delta {
                 match item {
-                    TextDelta::Retain { retain, .. } => offset += retain,
+                    TextDelta::Retain { retain, .. } => {
+                        at += measure(text.as_deref(), pos, retain);
+                        pos += retain;
+                    }
                     TextDelta::Insert { insert, .. } => {
-                        let len = insert.chars().count();
-                        applied.edits.push(TextEdit::Insert {
-                            at: offset,
-                            text: insert,
-                        });
-                        offset += len;
-                        applied.cursor = Some(offset);
+                        let len = self.units.count(&insert);
+                        if let Some(text) = &mut text {
+                            text.splice(pos..pos, insert.chars());
+                        }
+                        pos += insert.chars().count();
+                        applied.edits.push(TextEdit::Insert { at, text: insert });
+                        at += len;
+                        applied.cursor = Some(at);
                     }
                     TextDelta::Delete { delete } => {
-                        applied.edits.push(TextEdit::Delete {
-                            at: offset,
-                            len: delete,
-                        });
-                        applied.cursor = Some(offset);
+                        let len = measure(text.as_deref(), pos, delete);
+                        if let Some(text) = &mut text {
+                            text.drain(pos..pos + delete);
+                        }
+                        applied.edits.push(TextEdit::Delete { at, len });
+                        applied.cursor = Some(at);
                     }
                 }
             }
@@ -327,22 +365,26 @@ impl Draft {
     }
 }
 
+/// The width of `n` characters at `pos` in `text`, in UTF-16 units. Without
+/// a `text`, positions count characters, so the width is `n`.
+fn measure(text: Option<&[char]>, pos: usize, n: usize) -> usize {
+    text.map_or(n, |text| {
+        text[pos..pos + n].iter().map(|c| c.len_utf16()).sum()
+    })
+}
+
 /// Every open draft, written with one writer identity.
 pub struct Drafts {
     peer: u64,
+    units: Units,
     drafts: HashMap<String, Draft>,
 }
 
-impl Default for Drafts {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Drafts {
-    pub fn new() -> Self {
+    pub fn new(units: Units) -> Self {
         Self {
             peer: crdt::random_peer(),
+            units,
             drafts: HashMap::new(),
         }
     }
@@ -357,7 +399,7 @@ impl Drafts {
     /// `created: false`.
     pub fn open(&mut self, note: Note, snapshot: &[u8], created: bool) -> &mut Draft {
         let id = note.id.clone();
-        let draft = Draft::open(note, snapshot, created, self.peer);
+        let draft = Draft::open(note, snapshot, created, self.peer, self.units);
         self.drafts.entry(id).insert_entry(draft).into_mut()
     }
 
@@ -468,17 +510,17 @@ impl Drafts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::Repository;
+    use crate::{Rng, storage::Repository};
 
     /// A repository holding one new note, and an open draft of it.
-    fn setup() -> (tempfile::TempDir, Repository, Drafts, String) {
+    fn setup(units: Units) -> (tempfile::TempDir, Repository, Drafts, String) {
         let dir = tempfile::tempdir().unwrap();
         let mut repo = Repository::open(&dir.path().join("notes.db")).unwrap();
         let note = Note::blank();
         repo.create_note(&note).unwrap();
         let snapshot = repo.snapshot(&note.id).unwrap().unwrap();
         let id = note.id.clone();
-        let mut drafts = Drafts::new();
+        let mut drafts = Drafts::new(units);
         drafts.open(note, &snapshot, true);
         (dir, repo, drafts, id)
     }
@@ -501,39 +543,38 @@ mod tests {
         repo.load(id).unwrap().unwrap().body
     }
 
-    /// Applies edits the way a UI does, to a copy of the old text.
-    fn apply(text: &str, applied: &Applied) -> String {
-        let mut chars: Vec<char> = text.chars().collect();
-        for edit in &applied.edits {
-            match edit {
-                TextEdit::Insert { at, text } => {
-                    chars.splice(*at..*at, text.chars());
-                }
-                TextEdit::Delete { at, len } => {
-                    chars.drain(*at..*at + len);
+    /// Applies edits the way a UI does, to a copy of the old text: as
+    /// characters, like GTK, or as UTF-16 units, like a Java `Editable`.
+    fn apply(text: &str, applied: &Applied, units: Units) -> String {
+        fn edit<T>(mut buffer: Vec<T>, applied: &Applied, encode: fn(&str) -> Vec<T>) -> Vec<T> {
+            for edit in &applied.edits {
+                match edit {
+                    TextEdit::Insert { at, text } => {
+                        buffer.splice(*at..*at, encode(text));
+                    }
+                    TextEdit::Delete { at, len } => {
+                        buffer.drain(*at..*at + len);
+                    }
                 }
             }
+            buffer
         }
-        chars.into_iter().collect()
-    }
-
-    /// A small deterministic generator, so failures reproduce from the seed.
-    struct Rng(u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-        fn below(&mut self, n: usize) -> usize {
-            (self.next() % n as u64) as usize
+        match units {
+            Units::Chars => edit(text.chars().collect(), applied, |s| s.chars().collect())
+                .into_iter()
+                .collect(),
+            Units::Utf16 => {
+                String::from_utf16(&edit(text.encode_utf16().collect(), applied, |s| {
+                    s.encode_utf16().collect()
+                }))
+                .unwrap()
+            }
         }
     }
 
     #[test]
     fn a_pause_in_typing_saves_the_text() {
-        let (_dir, mut repo, mut drafts, id) = setup();
+        let (_dir, mut repo, mut drafts, id) = setup(Units::Chars);
         let d = drafts.get_mut(&id).unwrap();
         d.insert(0, "Hello 🌿").unwrap();
         d.insert(7, " world").unwrap();
@@ -557,7 +598,7 @@ mod tests {
 
     #[test]
     fn continuous_typing_still_saves_every_two_seconds() {
-        let (_dir, mut repo, mut drafts, id) = setup();
+        let (_dir, mut repo, mut drafts, id) = setup(Units::Chars);
         let start = drafts.get(&id).unwrap().last_queued;
         let mut saved_at = vec![];
         for step in 1..=20 {
@@ -577,7 +618,7 @@ mod tests {
 
     #[test]
     fn acknowledging_a_later_save_settles_earlier_ones() {
-        let (_dir, mut repo, mut drafts, id) = setup();
+        let (_dir, mut repo, mut drafts, id) = setup(Units::Chars);
         drafts.get_mut(&id).unwrap().insert(0, "one").unwrap();
         let first = drafts.flush();
         drafts.get_mut(&id).unwrap().insert(3, " two").unwrap();
@@ -604,7 +645,7 @@ mod tests {
 
     #[test]
     fn resending_after_a_failure_includes_later_edits() {
-        let (_dir, mut repo, mut drafts, id) = setup();
+        let (_dir, mut repo, mut drafts, id) = setup(Units::Chars);
         drafts.get_mut(&id).unwrap().insert(0, "lost").unwrap();
         // Storage reports this save as failed.
         assert_eq!(drafts.flush().len(), 1);
@@ -623,68 +664,78 @@ mod tests {
 
     #[test]
     fn imports_and_undos_return_edits_that_rebuild_the_text() {
-        let pieces = ["a", "xyz", "世界", "🌿", "é", "e\u{301}", "\n", "  "];
-        for seed in 1..=20u64 {
-            let mut rng = Rng(seed);
-            let other = LoroDoc::new();
-            other.set_peer_id(1).unwrap();
-            crdt::text(&other).insert(0, "Start 🌿 text").unwrap();
-            other.commit();
-            let mut drafts = Drafts::new();
-            let note = Note::blank();
-            let id = note.id.clone();
-            drafts.open(note, &other.export(ExportMode::Snapshot).unwrap(), true);
-            let mut sent = other.oplog_vv();
-            for _ in 0..40 {
-                let d = drafts.get_mut(&id).unwrap();
-                // Concurrent edits on both sides, so imports have to merge.
-                for (text, local) in [(crdt::text(&other), false), (crdt::text(&d.doc), true)] {
-                    let len = text.len_unicode();
-                    if len > 0 && rng.below(3) == 0 {
-                        let at = rng.below(len);
-                        let n = 1 + rng.below((len - at).min(4));
-                        if local {
-                            d.delete(at, n).unwrap();
-                        } else {
-                            text.delete(at, n).unwrap();
-                        }
-                    } else {
-                        let at = rng.below(len + 1);
-                        let piece = pieces[rng.below(pieces.len())];
-                        if local {
-                            d.insert(at, piece).unwrap();
-                        } else {
-                            text.insert(at, piece).unwrap();
-                        }
-                    }
-                }
+        let pieces = ["a", "xyz", "世界", "🌿", "é", "e\u{301}", "👩‍💻", "\n", "  "];
+        for units in [Units::Chars, Units::Utf16] {
+            for seed in 1..=20u64 {
+                let mut rng = Rng(seed);
+                let other = LoroDoc::new();
+                other.set_peer_id(1).unwrap();
+                crdt::text(&other).insert(0, "Start 🌿 text").unwrap();
                 other.commit();
-                let before = d.text();
-                let delta = other.export(ExportMode::updates(&sent)).unwrap();
-                sent = other.oplog_vv();
-                let applied = d.import(&delta);
-                assert_eq!(apply(&before, &applied), d.text(), "seed {seed}");
-                if rng.below(4) == 0 {
-                    let before = d.text();
-                    let undone = if rng.below(2) == 0 {
-                        d.undo()
+                let mut drafts = Drafts::new(units);
+                let note = Note::blank();
+                let id = note.id.clone();
+                drafts.open(note, &other.export(ExportMode::Snapshot).unwrap(), true);
+                let mut sent = other.oplog_vv();
+                for step in 0..40 {
+                    let context = format!("{units:?}, seed {seed}, step {step}");
+                    let d = drafts.get_mut(&id).unwrap();
+                    // Edits on both sides, so imports have to merge.
+                    let text = crdt::text(&other);
+                    let len = text.len_unicode();
+                    let at = rng.below(len + 1);
+                    if at < len && rng.below(3) == 0 {
+                        text.delete(at, 1 + rng.below((len - at).min(4))).unwrap();
                     } else {
-                        d.redo()
-                    };
-                    if let Some(applied) = undone {
-                        assert_eq!(apply(&before, &applied), d.text(), "seed {seed}");
+                        text.insert(at, pieces[rng.below(pieces.len())]).unwrap();
                     }
-                }
-                // Sometimes the other side catches up with this one.
-                if rng.below(3) == 0 {
-                    other
-                        .import(
-                            &d.doc
-                                .export(ExportMode::updates(&other.oplog_vv()))
-                                .unwrap(),
-                        )
-                        .unwrap();
+                    other.commit();
+                    // Typing, at positions in the draft's units.
+                    let body = crdt::text(&d.doc);
+                    let unit = |pos| match units {
+                        Units::Chars => pos,
+                        Units::Utf16 => body
+                            .convert_pos(pos, PosType::Unicode, PosType::Utf16)
+                            .unwrap(),
+                    };
+                    let len = body.len_unicode();
+                    let start = rng.below(len + 1);
+                    let end = start + rng.below((len - start).min(4) + 1);
+                    let (at, n) = (unit(start), unit(end) - unit(start));
+                    let piece = pieces[rng.below(pieces.len())];
+                    match rng.below(3) {
+                        0 => d.insert(at, piece),
+                        1 => d.delete(at, n),
+                        _ => d.replace(at, n, piece),
+                    }
+                    .unwrap();
+                    let before = d.text();
+                    let delta = other.export(ExportMode::updates(&sent)).unwrap();
                     sent = other.oplog_vv();
+                    let applied = d.import(&delta);
+                    assert_eq!(apply(&before, &applied, units), d.text(), "{context}");
+                    if rng.below(4) == 0 {
+                        let before = d.text();
+                        let undone = if rng.below(2) == 0 {
+                            d.undo()
+                        } else {
+                            d.redo()
+                        };
+                        if let Some(applied) = undone {
+                            assert_eq!(apply(&before, &applied, units), d.text(), "{context}");
+                        }
+                    }
+                    // Sometimes the other side catches up with this one.
+                    if rng.below(3) == 0 {
+                        other
+                            .import(
+                                &d.doc
+                                    .export(ExportMode::updates(&other.oplog_vv()))
+                                    .unwrap(),
+                            )
+                            .unwrap();
+                        sent = other.oplog_vv();
+                    }
                 }
             }
         }
@@ -692,7 +743,7 @@ mod tests {
 
     #[test]
     fn undo_after_a_remote_edit_reverts_only_local_typing() {
-        let (_dir, mut repo, mut drafts, id) = setup();
+        let (_dir, mut repo, mut drafts, id) = setup(Units::Chars);
         drafts.get_mut(&id).unwrap().insert(0, "Hello").unwrap();
         for command in drafts.flush() {
             store(&mut repo, &mut drafts, command);
@@ -707,7 +758,10 @@ mod tests {
         let delta = repo.take_changes().pop().unwrap().delta;
         let d = drafts.get_mut(&id).unwrap();
         let applied = d.import(&delta);
-        assert_eq!(apply("Hello", &applied), "> From the laptop\nHello");
+        assert_eq!(
+            apply("Hello", &applied, Units::Chars),
+            "> From the laptop\nHello"
+        );
         assert_eq!(d.text(), "> From the laptop\nHello");
         let prefix = "> From the laptop\n".chars().count();
         let sequence = d.sequence;
@@ -724,7 +778,7 @@ mod tests {
 
     #[test]
     fn replacing_a_composing_word_records_only_the_change() {
-        let (_dir, _repo, mut drafts, id) = setup();
+        let (_dir, _repo, mut drafts, id) = setup(Units::Chars);
         let peer = drafts.peer();
         let ops = |d: &Draft| d.doc.oplog_vv().get(&peer).copied().unwrap_or(0);
         let d = drafts.get_mut(&id).unwrap();
@@ -748,7 +802,7 @@ mod tests {
 
     #[test]
     fn positions_past_the_end_change_nothing() {
-        let (_dir, _repo, mut drafts, id) = setup();
+        let (_dir, _repo, mut drafts, id) = setup(Units::Chars);
         let d = drafts.get_mut(&id).unwrap();
         d.insert(0, "🌿 ok").unwrap();
         let sequence = d.sequence;
@@ -764,7 +818,7 @@ mod tests {
 
     #[test]
     fn trimming_keeps_the_active_draft_and_unsaved_edits() {
-        let mut drafts = Drafts::new();
+        let mut drafts = Drafts::new(Units::Chars);
         let start = Instant::now();
         let mut ids = vec![];
         for i in 0..CACHE_LIMIT + 3 {
@@ -793,5 +847,65 @@ mod tests {
             assert!(drafts.get(id).is_some());
         }
         assert!(drafts.trim(Some(&ids[0])).is_empty());
+    }
+
+    #[test]
+    fn utf16_typing_and_imports_count_emoji_as_two_units() {
+        let (_dir, mut repo, mut drafts, id) = setup(Units::Utf16);
+        let d = drafts.get_mut(&id).unwrap();
+        d.insert(0, "🌿 tea").unwrap();
+        d.insert(2, "!").unwrap();
+        assert_eq!(d.text(), "🌿! tea");
+        // Inside the emoji's surrogate pair is no place for an edit.
+        assert_eq!(d.insert(1, "x"), Err(OutOfSync));
+        assert_eq!(d.delete(1, 2), Err(OutOfSync));
+        assert_eq!(d.replace(0, 1, "x"), Err(OutOfSync));
+        assert_eq!(d.insert(8, "x"), Err(OutOfSync));
+        d.delete(0, 3).unwrap();
+        assert_eq!(d.text(), " tea");
+        d.insert(0, "🌿🌿").unwrap();
+        d.replace(2, 2, "🌱").unwrap();
+        assert_eq!(d.text(), "🌿🌱 tea");
+        for command in drafts.flush() {
+            store(&mut repo, &mut drafts, command);
+        }
+        for change in repo.take_changes() {
+            let d = drafts.get_mut(&id).unwrap();
+            assert_eq!(d.import(&change.delta), Applied::default());
+        }
+        // Another device removes the first emoji and adds to the end.
+        repo.save(&id, "🌱 tea, hot").unwrap();
+        let delta = repo.take_changes().pop().unwrap().delta;
+        let d = drafts.get_mut(&id).unwrap();
+        let applied = d.import(&delta);
+        assert_eq!(
+            applied.edits,
+            [
+                TextEdit::Delete { at: 0, len: 2 },
+                TextEdit::Insert {
+                    at: 6,
+                    text: ", hot".into()
+                },
+            ]
+        );
+        assert_eq!(apply("🌿🌱 tea", &applied, Units::Utf16), "🌱 tea, hot");
+        assert_eq!(d.text(), "🌱 tea, hot");
+    }
+
+    #[test]
+    fn utf16_undo_places_the_cursor_after_emoji() {
+        let (_dir, _repo, mut drafts, id) = setup(Units::Utf16);
+        let d = drafts.get_mut(&id).unwrap();
+        // Each edit undoes on its own.
+        d.undo.set_merge_interval(0);
+        d.insert(0, "🌿🌿 ").unwrap();
+        d.insert(5, "tea").unwrap();
+        let undone = d.undo().unwrap();
+        assert_eq!(d.text(), "🌿🌿 ");
+        assert_eq!(undone.edits, [TextEdit::Delete { at: 5, len: 3 }]);
+        assert_eq!(undone.cursor, Some(5));
+        let redone = d.redo().unwrap();
+        assert_eq!(d.text(), "🌿🌿 tea");
+        assert_eq!(redone.cursor, Some(8));
     }
 }

@@ -139,7 +139,10 @@ fn build(
                 while let Ok(newer) = incoming.try_recv() {
                     job = newer;
                 }
-                if outgoing.send((job.0, markdown::parse(&job.1))).is_err() {
+                if outgoing
+                    .send((job.0, markdown::parse(&job.1, Units::Chars)))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -489,7 +492,7 @@ fn build(
             notebooks: vec![],
             notes: vec![],
             counts: NoteCounts::new(),
-            drafts: Drafts::new(),
+            drafts: Drafts::new(Units::Chars),
             pages: HashMap::new(),
             active: None,
             filter: Filter::Notebook(DEFAULT_NOTEBOOK.into()),

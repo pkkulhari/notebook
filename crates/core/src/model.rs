@@ -45,6 +45,33 @@ pub enum Filter {
 
 pub type NoteCounts = std::collections::HashMap<Filter, u64>;
 
+/// What a text position counts. GTK and Loro count characters (Unicode scalar
+/// values), while Android's text APIs count UTF-16 code units, so 🌿 is one
+/// character but two units.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Units {
+    Chars,
+    Utf16,
+}
+
+impl Units {
+    /// The width of one character.
+    pub fn width(self, ch: char) -> usize {
+        match self {
+            Units::Chars => 1,
+            Units::Utf16 => ch.len_utf16(),
+        }
+    }
+
+    /// The length of `text`.
+    pub fn count(self, text: &str) -> usize {
+        match self {
+            Units::Chars => text.chars().count(),
+            Units::Utf16 => text.encode_utf16().count(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Preferences {

@@ -45,7 +45,7 @@ fn main() {
     let mut timings = vec![];
     for _ in 0..50 {
         let start = Instant::now();
-        std::hint::black_box(markdown::parse(&note.body));
+        std::hint::black_box(markdown::parse(&note.body, Units::Chars));
         timings.push(start.elapsed());
     }
     timings.sort();

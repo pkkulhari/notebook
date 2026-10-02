@@ -1,4 +1,6 @@
-//! Pure Markdown presentation: source is never modified, and all UI offsets are characters.
+//! Pure Markdown presentation: source is never modified, and all UI offsets
+//! are in the caller's `Units`.
+use crate::model::Units;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 use std::ops::Range;
 
@@ -42,12 +44,15 @@ impl Document {
     }
 }
 
-pub fn parse(source: &str) -> Document {
+pub fn parse(source: &str, units: Units) -> Document {
     let mut doc = Document::default();
+    // Each byte's position in `units`, from the start of its character.
     let mut offsets = vec![0i32; source.len() + 1];
-    for (count, (byte, ch)) in source.char_indices().enumerate() {
-        offsets[byte..byte + ch.len_utf8()].fill(count as i32);
-        offsets[byte + ch.len_utf8()] = count as i32 + 1;
+    let mut at = 0;
+    for (byte, ch) in source.char_indices() {
+        offsets[byte..byte + ch.len_utf8()].fill(at);
+        at += units.width(ch) as i32;
+        offsets[byte + ch.len_utf8()] = at;
     }
     let chars = |r: Range<usize>| offsets[r.start]..offsets[r.end];
     let mut image_depth = 0;
@@ -174,7 +179,7 @@ pub fn parse(source: &str) -> Document {
         }
     }
     // Include the end-of-document cursor in the final block.
-    let end = source.chars().count() as i32;
+    let end = offsets[source.len()];
     for block in &mut doc.blocks {
         if block.end == end {
             block.end += 1;
@@ -201,6 +206,9 @@ pub enum ListEnter {
     End,
 }
 
+/// What Enter does at the end of a list item. `marker` is where the item's
+/// content starts. Everything before it (indent, bullet or number, task box) is
+/// ASCII, so it's the same count in every `Units`.
 pub fn list_enter(line: &str) -> Option<ListEnter> {
     let spaces = |s: &str| s.len() - s.trim_start_matches([' ', '\t']).len();
     let indent = spaces(line);
@@ -283,12 +291,99 @@ fn plain(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Rng;
+
+    /// Checks that every range `parse` finds in UTF-16 units is the matching
+    /// character range, converted.
+    fn assert_units_agree(source: &str) {
+        fn tagged<'a>(
+            tag: &'static str,
+            ranges: &'a [Range<i32>],
+        ) -> impl Iterator<Item = (&'static str, Range<i32>)> + 'a {
+            ranges.iter().map(move |r| (tag, r.clone()))
+        }
+        fn ranges(doc: &Document) -> Vec<(&'static str, Range<i32>)> {
+            doc.spans
+                .iter()
+                .map(|s| (s.style, s.range.clone()))
+                .chain(tagged("hidden", &doc.hidden))
+                .chain(tagged("block", &doc.blocks))
+                .chain(tagged("marker", &doc.list_markers))
+                .chain(doc.links.iter().map(|(r, _)| ("link", r.clone())))
+                .collect()
+        }
+        // The UTF-16 position of each character position, and one past the
+        // end for the end-of-document cursor.
+        let mut utf16 = vec![0];
+        for ch in source.chars() {
+            utf16.push(utf16.last().unwrap() + ch.len_utf16() as i32);
+        }
+        utf16.push(utf16.last().unwrap() + 1);
+        let expected: Vec<_> = ranges(&parse(source, Units::Chars))
+            .into_iter()
+            .map(|(tag, r)| (tag, utf16[r.start as usize]..utf16[r.end as usize]))
+            .collect();
+        assert_eq!(ranges(&parse(source, Units::Utf16)), expected, "{source:?}");
+    }
+
+    #[test]
+    fn utf16_ranges_cover_the_same_text() {
+        let source = "# नमस्ते 🌿\n\n**hello _世界_** and `λ` 🌿🌿 ~~x~~";
+        assert_units_agree(source);
+        let units: Vec<u16> = source.encode_utf16().collect();
+        let doc = parse(source, Units::Utf16);
+        let text =
+            |r: &Range<i32>| String::from_utf16(&units[r.start as usize..r.end as usize]).unwrap();
+        let styled =
+            |style: &str| text(&doc.spans.iter().find(|s| s.style == style).unwrap().range);
+        assert_eq!(styled("h1").trim_end(), "# नमस्ते 🌿");
+        assert_eq!(styled("emphasis"), "_世界_");
+        assert_eq!(styled("code"), "`λ`");
+        assert_eq!(styled("strike"), "~~x~~");
+        // The last block reaches past the end, so a cursor there is inside it.
+        assert_eq!(doc.blocks.last().unwrap().end as usize, units.len() + 1);
+    }
+
+    #[test]
+    fn utf16_ranges_match_character_ranges_for_any_text() {
+        let pieces = [
+            "a",
+            "word ",
+            "世界",
+            "🌿",
+            "e\u{301}",
+            "👩‍💻",
+            "\n",
+            "\n\n",
+            "  ",
+            "#",
+            "# ",
+            "## ",
+            "**",
+            "_",
+            "`",
+            "~~",
+            "> ",
+            "- ",
+            "1. ",
+            "- [ ] ",
+            "[🌿](https://example.org)",
+            "```\n",
+        ];
+        for seed in 1..=500u64 {
+            let mut rng = Rng(seed);
+            let source: String = (0..1 + rng.below(40))
+                .map(|_| pieces[rng.below(pieces.len())])
+                .collect();
+            assert_units_agree(&source);
+        }
+    }
 
     #[test]
     fn list_spacing_only_applies_to_item_starts() {
         let source = "- 世界\n  continuation\n  - nested\n- [ ] task\n\n1. ordered\n2. next\n";
         let chars: Vec<char> = source.chars().collect();
-        let starts: Vec<String> = parse(source)
+        let starts: Vec<String> = parse(source, Units::Chars)
             .spans
             .iter()
             .filter(|span| span.style == "list-item-start")
@@ -308,7 +403,7 @@ mod tests {
     fn list_markers_cover_indent_bullet_and_task_box() {
         let source = "- one\n  - [ ] nested task\n10. ten\n";
         let chars: Vec<char> = source.chars().collect();
-        let markers: Vec<String> = parse(source)
+        let markers: Vec<String> = parse(source, Units::Chars)
             .list_markers
             .iter()
             .map(|r| chars[r.start as usize..r.end as usize].iter().collect())
@@ -334,6 +429,14 @@ mod tests {
                 next: "\n- [ ] ".into()
             })
         );
+        // Markers are ASCII, so `marker` is the same in characters and UTF-16.
+        assert_eq!(
+            list_enter("- [ ] 🌿 x"),
+            Some(ListEnter::Continue {
+                marker: 6,
+                next: "\n- [ ] ".into()
+            })
+        );
         for line in ["- ", "1. ", "- [ ] ", "  - [x]"] {
             assert_eq!(list_enter(line), Some(ListEnter::End), "{line:?}");
         }
@@ -345,7 +448,7 @@ mod tests {
     #[test]
     fn unicode_ranges_and_nested_formatting() {
         let source = "# नमस्ते 🌿\n\n**hello _世界_** and `λ`\n";
-        let doc = parse(source);
+        let doc = parse(source, Units::Chars);
         let chars: Vec<char> = source.chars().collect();
         for span in &doc.spans {
             assert!(span.range.end as usize <= chars.len());
@@ -362,7 +465,7 @@ mod tests {
 
     #[test]
     fn active_block_and_selection_reveal_syntax() {
-        let doc = parse("**one**\n\n*two*");
+        let doc = parse("**one**\n\n*two*", Units::Chars);
         assert_eq!(doc.hidden_outside(2..2).len(), 2);
         assert!(doc.hidden_outside(2..12).is_empty());
         assert_eq!(doc.hidden_outside(14..14).len(), 2);
@@ -371,14 +474,17 @@ mod tests {
     #[test]
     fn incomplete_syntax_is_preserved() {
         let source = "hello **unfinished [link](\n\n![image](pic.png)";
-        let doc = parse(source);
+        let doc = parse(source, Units::Chars);
         assert!(doc.hidden.is_empty());
         assert!(doc.links.is_empty());
     }
 
     #[test]
     fn link_destinations_and_fences() {
-        let doc = parse("[site](https://example.org)\n\n```rust\nlet x = 1;\n```\n");
+        let doc = parse(
+            "[site](https://example.org)\n\n```rust\nlet x = 1;\n```\n",
+            Units::Chars,
+        );
         assert_eq!(doc.links[0].1, "https://example.org");
         assert!(doc.spans.iter().any(|s| s.style == "code-block"));
         assert_eq!(doc.hidden.len(), 4);
@@ -387,7 +493,7 @@ mod tests {
     #[test]
     fn single_tilde_and_unicode_never_hide_content() {
         for source in ["~é~", "~~世界~~", "***bold emphasis***", "`🌿`"] {
-            let doc = parse(source);
+            let doc = parse(source, Units::Chars);
             let characters: Vec<char> = source.chars().collect();
             for range in doc.hidden {
                 assert!(
