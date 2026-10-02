@@ -105,4 +105,11 @@ Record the results in Notes, with the phone model and Android version.
   3. `sync_peer --dir DIR --introduce ID@127.0.0.1:47000 --join CODE --note TEXT` pairs with the code the app shows, and syncs both ways. The peer's note appeared in the app's list, and the app's note reached the peer.
   4. After the app went to the background and came back, the restarted peer reconnected and synced, with a new forward to the new port.
 - **Tests:** `SyncTest` covers the screen: the switch, renaming, showing and cancelling a code, and suspend and resume.
-- **Still manual, on a real phone:** the interop list above (with the GTK app, Wi-Fi changes, mobile data with a relay, removal, ten minutes in the background), and Android 17.
+- **On a real phone (Motorola Edge 50 Fusion, Android 16, same Wi-Fi as the laptop), against `sync_peer`, which runs the same sync code as the GTK app:**
+  - Pairing over mDNS works both ways. The laptop entering the phone's code paired in about 2 s; the phone entering the laptop's code paired 0.2 s after tapping **Pair**.
+  - The first sync of 10,001 notes finished about 1 s after connecting.
+  - A 10 s Wi-Fi outage didn't break the session. After a 45 s outage it came back 4.5 s after Wi-Fi was turned on, including rejoining the access point.
+  - Going to the background: the laptop saw the phone leave within 0.6 s. Reopening reconnected in 0.2 s.
+  - Killing the app while connected left the laptop holding the dead session. After a cold start the phone's new connection replaced it, and they had synced again 0.85 s after launch (step 5's fix).
+  - Removing the phone on the laptop: the phone can't reconnect and shows "Not connected". It doesn't say it was removed.
+- **Still manual:** pairing with the real GTK app; switching networks, and mobile data with a relay; Android 17's local network permission.

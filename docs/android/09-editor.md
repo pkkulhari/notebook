@@ -115,10 +115,16 @@ Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` i
   - `TextView` sends its whole text to the autofill service after every change, parcelled with its spans, even with `importantForAutofill="no"` in the layout.
   - On a 50,000-character note that was a 252 KB binder transaction per keystroke: about 75 ms each, and eventually a `TransactionTooLargeException` crash.
   - It also sends note text to other apps. `NoteEditText` now returns `AUTOFILL_TYPE_NONE` and sets `importantForContentCapture` to no.
-- **Styling a whole note happens off screen.** Each `setSpan` on text with a layout attached reflows it, so styling a 50,000-character note span by span took 4.5 s.
-  - `MarkdownStyler.style` parses synchronously and builds the spans on a `SpannableString` with no layout attached. Unlike `SpannableStringBuilder`, it doesn't keep spans sorted as they're added.
-  - `setText` then copies the spans in once.
-  - Later parses change only the spans that differ. When a parse would add more than 300 spans, as after a long paste, the editor sets its text again the same way.
+- **Typing stalled on the phone: the styling spans live on an overlay, not on the edited text.**
+  - On the phone, typing near the top of a long, formatted note stalled for seconds. `SpannableStringBuilder.replace` tells the layout about every span the edit moves, and `DynamicLayout` lays out again the paragraph of every moved span that changes size or width: bold, italic, monospace, heading sizes and hidden syntax.
+  - simpleperf showed about 290 ms per keystroke in a 50,000-character note. Typing at the end of a note doesn't show the cost, which is why the instrumented test missed it at first.
+  - Styling only a window around the screen helped too little: real Markdown has long wrapping paragraphs, and the 100 KB docs note still ran at 44 ms frames.
+  - So the spans now live on an overlay, a copy of the text that a text watcher keeps in step. The watcher's span priority (200) runs it before the layout's watchers (100 and 128).
+  - A `TransformationMethod` hands the widget a `Spanned` that combines the text's own spans with the overlay's. The widget lays out and draws the styling, while the keyboard edits text with no size-affecting spans, so a keystroke lays out only its own paragraph.
+  - When the overlay changes after a parse, the layout is told by setting and removing a no-op `MetricAffectingSpan` on the edited text over each changed range, with nearby ranges merged.
+  - Results on the phone, release build, typing near the top: frame median 6 ms and 0 janky frames in the 50,000-character note; median 7 ms and 1 janky frame in the 100 KB docs note. Debug builds take 18–20 ms per keystroke either way.
+- **Styling a whole note happens off screen.** Building thousands of spans one by one is slow, so `MarkdownStyler.style` builds them on a `SpannableString` and copies them into the overlay in one pass. `SpannableStringBuilder` keeps its spans sorted as each one is added; the copy sorts them once. When a parse brings more than 500 new spans, as after a long paste, the overlay is rebuilt the same way.
+- **Code uses Droid Sans Mono, loaded from `/system/fonts`.** On the Motorola, the font setting replaces every family: `Typeface.MONOSPACE` is the proportional system font, and its backtick has no width, so `` `a `` drew as "à". The editor falls back to `Typeface.MONOSPACE` if the file is missing.
 - **Hidden syntax is recomputed only when the active blocks change.** A new FFI call, `active_blocks`, makes this possible, so moving the cursor within a block costs nothing.
 - **Hidden ranges never contain a line break.** The FFI splits them, with a Rust test. The only case was a setext heading's underline (`===\n`). On Android its line stays as an empty line, where the desktop hides it entirely.
 - **Trashed notes stay non-focusable**, as in step 8, rather than using `keyListener = null` plus `setTextIsSelectable(true)`. Switching back means restoring the key listener, movement method and input type by hand, which is fragile. They can't be selected or copied until restored.
@@ -132,4 +138,4 @@ Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` i
   - A change before the cursor, list continuation and ending (including a hardware Enter), no continuation inside code blocks, syntax per active block, copy and paste, and the 50k timing.
   - The tests detach the real keyboard first. An attached IME finishes compositions it didn't start, which made the first version of the composition test fail.
   - Doc test 2 applies an `Applied` through the store's listener, because instrumented tests have no second device. The core's side of a remote edit, and doc test 3, are covered by the Rust tests.
-  - Test 7, with Gboard and a second keyboard on a phone, is still a manual check.
+  - Test 7: on the phone, injected keystrokes went through Gboard, which composed and committed words, with no lost or doubled characters. A second keyboard is still untested.

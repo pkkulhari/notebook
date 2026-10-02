@@ -62,10 +62,9 @@ This folder splits the work into steps. Each step lands on the `android-app` bra
 | 10 | [Sync](10-sync.md) | Kotlin, Rust | 8 | Pairing and syncing with the Linux app |
 | 11 | [Release](11-release.md) | Both | 9, 10 | A signed, measured, size-checked APK |
 
-**Where it stands:** steps 1 to 11 are implemented on `android-app`. These still need a physical phone, so they're listed in the docs:
-- the manual pairing and interop tests with the GTK app (01, 10)
-- keyboard composition with Gboard and a second keyboard (09)
-- release timings: cold start, keystroke to screen, opening a note, memory (11)
+**Where it stands:** steps 1 to 11 are implemented on `android-app`, and tested on an emulator and on a Motorola Edge 50 Fusion (Android 16). Still open:
+- pairing with the real GTK app (01, 10), and sync over mobile data or across networks (10)
+- a second keyboard besides Gboard (09)
 - an Android 17 device, for the local network permission (10)
 
 Choosing a distribution channel is also still open (11).

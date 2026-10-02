@@ -16,10 +16,10 @@ The spike measured a Motorola Edge 50 Fusion (Android 16) with the `spike-releas
 | APK download size (arm64) | `apkanalyzer apk download-size` | 8.4 MB | 6.5 MB | ≤ 10 MB |
 | APK file size (arm64) | `apkanalyzer apk file-size` | 18.8 MB | 15.0 MB | ≤ 22 MB |
 | Rust `.so` size | `ls -l` on the stripped library | 16.2 MB | 14.3 MB | ≤ 18 MB |
-| Cold start to note list | `adb shell am start -W`, `TotalTime` | about 190 ms | needs the phone | ≤ 300 ms |
-| Keystroke to screen | GPU profiler while typing in a 50,000-character note | — | needs the phone | no dropped frames |
-| Open a note | Log timestamps from tap to text shown | — | needs the phone | < 100 ms |
-| Memory, idle in editor | `adb shell dumpsys meminfo` | not measured | needs the phone | set after measuring |
+| Cold start to note list | `adb shell am start -W`, `TotalTime` | about 190 ms | 205–209 ms with 10,000 notes and sync on | ≤ 300 ms |
+| Keystroke to screen | `dumpsys gfxinfo` while typing near the top of a long note | — | median 6–7 ms, 99th percentile 11–20 ms, at most 1 janky frame | no dropped frames |
+| Open a note | main-thread time sampled with simpleperf | — | 7–15 ms | < 100 ms |
+| Memory, idle in editor | `adb shell dumpsys meminfo`, total PSS | not measured | 107 MB (110 MB with a 100 KB note open) | ≤ 150 MB |
 
 Measure only non-debuggable release builds. In the spike, a debuggable build took about twice as long to start.
 
@@ -93,4 +93,8 @@ Run before each release:
   - `cargo bloat`: the size budget is met, so the tool wasn't installed.
   - A baseline profile: decide once cold start is measured on the phone.
   - A distribution channel.
-- **Test matrix so far:** all 14 instrumented tests pass on an x86_64 API 36 emulator with 16 KB pages. The arm64 phone runs are still to do, so run `connectedDebugAndroidTest` there only if its notes don't matter.
+- **Test matrix so far:** all 14 instrumented tests pass on an x86_64 API 36 emulator with 16 KB pages, and on a Motorola Edge 50 Fusion (arm64, Android 16, 4 KB pages). Run `connectedDebugAndroidTest` on a phone only if its notes don't matter.
+- **Phone measurements** used the release build signed with the debug key, which is `profileable` so `simpleperf` and `gfxinfo` can measure it:
+  - Keystrokes were measured on a 50,000-character note with every line formatted (0 janky frames), and on this folder's docs as one 100 KB note (1 janky frame out of 25–53).
+  - Opening a note costs the main thread 7–15 ms. The first frame of the dense 50,000-character note takes about 190 ms to complete; the 100 KB docs note shows no slow frame.
+  - Memory is mostly native heap (37 MB: Rust, SQLite and iroh) and graphics buffers (42 MB); the Java heap is 7 MB.
