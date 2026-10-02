@@ -87,7 +87,6 @@ pub struct Draft {
 }
 
 impl Draft {
-    /// A new note passes an empty `snapshot`.
     fn open(mut note: Note, snapshot: &[u8], created: bool, peer: u64, units: Units) -> Self {
         let doc = LoroDoc::from_snapshot(snapshot).unwrap_or_else(|_| LoroDoc::new());
         // Set before any edit and before the undo manager binds to the peer.
@@ -449,7 +448,6 @@ impl Drafts {
             .collect()
     }
 
-    /// Storage created the note.
     pub fn created(&mut self, id: &str) {
         if let Some(d) = self.drafts.get_mut(id) {
             d.created = true;
@@ -647,7 +645,6 @@ mod tests {
     fn resending_after_a_failure_includes_later_edits() {
         let (_dir, mut repo, mut drafts, id) = setup(Units::Chars);
         drafts.get_mut(&id).unwrap().insert(0, "lost").unwrap();
-        // Storage reports this save as failed.
         assert_eq!(drafts.flush().len(), 1);
         drafts
             .get_mut(&id)
@@ -690,7 +687,6 @@ mod tests {
                         text.insert(at, pieces[rng.below(pieces.len())]).unwrap();
                     }
                     other.commit();
-                    // Typing, at positions in the draft's units.
                     let body = crdt::text(&d.doc);
                     let unit = |pos| match units {
                         Units::Chars => pos,
@@ -725,7 +721,6 @@ mod tests {
                             assert_eq!(apply(&before, &applied, units), d.text(), "{context}");
                         }
                     }
-                    // Sometimes the other side catches up with this one.
                     if rng.below(3) == 0 {
                         other
                             .import(
@@ -753,7 +748,6 @@ mod tests {
             let d = drafts.get_mut(&id).unwrap();
             assert_eq!(d.import(&change.delta), Applied::default());
         }
-        // Another device's edit reaches the draft through storage.
         repo.save(&id, "> From the laptop\nHello").unwrap();
         let delta = repo.take_changes().pop().unwrap().delta;
         let d = drafts.get_mut(&id).unwrap();
@@ -788,11 +782,9 @@ mod tests {
         assert_eq!(d.text(), "say hell");
         assert_eq!(ops(d) - before, 1);
         assert_eq!(d.sequence, sequence + 1);
-        // Rewriting the same word records nothing.
         d.replace(4, 4, "hell").unwrap();
         assert_eq!(ops(d) - before, 1);
         assert_eq!(d.sequence, sequence + 1);
-        // One changed letter is one deletion and one insertion.
         d.replace(4, 4, "help").unwrap();
         assert_eq!(d.text(), "say help");
         assert_eq!(ops(d) - before, 3);
@@ -826,7 +818,6 @@ mod tests {
             ids.push(note.id.clone());
             drafts.open(note, &[], true).last_opened = start + Duration::from_secs(i as u64);
         }
-        // Saved edits don't keep a draft open.
         drafts.get_mut(&ids[3]).unwrap().insert(0, "saved").unwrap();
         for command in drafts.flush() {
             let Command::Edit { id, sequence, .. } = command else {
@@ -873,7 +864,6 @@ mod tests {
             let d = drafts.get_mut(&id).unwrap();
             assert_eq!(d.import(&change.delta), Applied::default());
         }
-        // Another device removes the first emoji and adds to the end.
         repo.save(&id, "🌱 tea, hot").unwrap();
         let delta = repo.take_changes().pop().unwrap().delta;
         let d = drafts.get_mut(&id).unwrap();

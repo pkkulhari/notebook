@@ -24,7 +24,6 @@ fn xdg_path(var: &str, fallback: &str, file: &str) -> PathBuf {
     root.join(file)
 }
 
-/// What other devices call this one until someone picks a name.
 pub fn device_name() -> String {
     std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|name| name.trim().to_string())

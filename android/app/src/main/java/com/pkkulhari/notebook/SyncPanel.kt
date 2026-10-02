@@ -12,14 +12,9 @@ import com.pkkulhari.notebook.core.Pairing
 import com.pkkulhari.notebook.core.SyncControl
 import com.pkkulhari.notebook.core.SyncStatus
 
-/**
- * The sync screen, worded like the desktop's sync dialog. It shows the
- * core's status, and sends the person's choices back as controls.
- */
 class SyncPanel(
     private val root: View,
     private val store: Store,
-    /** Asks for local network access before sync reaches out, where Android requires it. */
     private val allowLocalNetwork: () -> Unit,
 ) {
     private val enabled: Switch = root.findViewById(R.id.sync_enabled)
@@ -37,7 +32,6 @@ class SyncPanel(
     /** Set while widgets are updated from status, so they don't send it back. */
     private var quiet = false
 
-    /** Shown in the problem line when local network access was refused. */
     var localNetworkDenied = false
         set(value) {
             field = value

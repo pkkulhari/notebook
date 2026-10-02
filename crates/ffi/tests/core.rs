@@ -3,7 +3,6 @@ use notebook_ffi::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Records what the core reports, like the Kotlin listener.
 #[derive(Default)]
 struct Recorder {
     events: Mutex<Vec<CoreEvent>>,
@@ -21,7 +20,6 @@ impl CoreListener for Recorder {
 }
 
 impl Recorder {
-    /// The first recorded event `find` accepts, waiting for it if needed.
     fn wait<T>(&self, what: &str, find: impl Fn(&CoreEvent) -> Option<T>) -> T {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -69,7 +67,6 @@ impl Phone {
         Self { dir, core, events }
     }
 
-    /// Initializes, and opens the draft of the note `Ready` brings.
     fn ready(&self) -> String {
         self.core.initialize();
         let (note, snapshot) = self.events.wait("Ready", |e| match e {
@@ -81,7 +78,6 @@ impl Phone {
         id
     }
 
-    /// Sleeps as `tick` asks until nothing is waiting to be saved.
     fn save_all(&self) {
         loop {
             let wait = self.core.tick();
@@ -174,7 +170,6 @@ fn imported_changes_come_back_in_utf16_units() {
     phone.save_all();
     phone.events.saved(&id);
     phone.import_deltas(&id);
-    // Another device edits after the emoji.
     let reader = storage::open_reader(&phone.dir.path().join("notebook.db")).unwrap();
     let shared = storage::export_since(&reader, &id, None).unwrap().unwrap();
     let mut other = Repository::open(&phone.dir.path().join("other.db")).unwrap();

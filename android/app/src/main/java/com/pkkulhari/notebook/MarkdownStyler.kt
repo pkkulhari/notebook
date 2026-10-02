@@ -39,18 +39,10 @@ import java.util.concurrent.Executors
 import kotlin.math.ceil
 
 /**
- * Styles the editor's Markdown as the desktop does: formatting spans, hanging
- * indents for list items, and syntax hidden outside the block being edited.
- * The source text never changes.
- *
- * The spans don't go on the text the keyboard edits. Android lays out a
- * span's paragraph again whenever the span moves, and every keystroke moves
- * every span after the cursor, which made typing in a long note slower the
- * more it was formatted. Instead the spans live on an overlay: a copy of the
- * text that a watcher keeps in step with every edit. A [TransformationMethod]
- * shows the text widget the text with the overlay's spans, so the widget lays
- * out and draws them while the keyboard edits plain text. When the overlay's
- * spans change, only the paragraphs they're in are laid out again.
+ * Keeps formatting spans on a mirrored overlay, exposed through a
+ * [TransformationMethod], while the keyboard edits plain Markdown. Spans on
+ * the Editable would trigger paragraph layout whenever typing shifts them;
+ * the overlay lets us relayout only paragraphs whose styling changed.
  */
 class MarkdownStyler(private val text: NoteEditText) {
     private val main = Handler(Looper.getMainLooper())
@@ -67,10 +59,8 @@ class MarkdownStyler(private val text: NoteEditText) {
     private var document: MarkdownDocument? = null
     private var current = false
 
-    /** The text again, carrying the styling spans. */
     private var overlay = SpannableStringBuilder()
 
-    /** Spans on the overlay, by what they stand for. */
     private var styles = listOf<Styled>()
     private var hidden = listOf<HiddenSpan>()
 
@@ -81,7 +71,6 @@ class MarkdownStyler(private val text: NoteEditText) {
     var onLink: ((String?) -> Unit)? = null
     private var link: String? = null
 
-    /** What a span stands for. A list marker's indent is measured once, when it's added. */
     private data class Key(val style: Style?, val start: Int, val end: Int)
 
     private class Styled(val key: Key, val spans: List<Any>)
@@ -96,7 +85,6 @@ class MarkdownStyler(private val text: NoteEditText) {
         ) {}
     }
 
-    /** A little space above a list item's first line. */
     private class SpaceAbove(private val px: Int) : LineHeightSpan {
         override fun chooseHeight(text: CharSequence, start: Int, end: Int, spanstartv: Int, lineHeight: Int, fm: Paint.FontMetricsInt) {
             if ((text as Spanned).getSpanStart(this) in start until end) {
@@ -190,7 +178,6 @@ class MarkdownStyler(private val text: NoteEditText) {
         overlay = SpannableStringBuilder(styled)
     }
 
-    /** Keeps the overlay in step with the widget's text, which was just set. */
     fun attach() {
         val editable = text.text
         editable.setSpan(mirror, 0, editable.length, Spanned.SPAN_INCLUSIVE_INCLUSIVE or (MIRROR_PRIORITY shl Spanned.SPAN_PRIORITY_SHIFT))
@@ -360,11 +347,7 @@ class MarkdownStyler(private val text: NoteEditText) {
         )
     }
 
-    /**
-     * Hides syntax everywhere except the blocks the selection touches. Only
-     * moving into another block changes anything, so moving within one is
-     * free. Returns the ranges that changed.
-     */
+    /** Returns changed syntax ranges; moving within the same blocks needs no relayout. */
     private fun updateHidden(target: Spannable, start: Int, end: Int): List<IntRange> {
         val document = document ?: return emptyList()
         val blocks = document.activeBlocks(start, end)
@@ -442,7 +425,6 @@ class MarkdownStyler(private val text: NoteEditText) {
     ).toInt()
 
     companion object {
-        /** As on the desktop: parse once typing pauses this long. */
         const val PARSE_DELAY_MS = 80L
 
         /**
@@ -458,10 +440,8 @@ class MarkdownStyler(private val text: NoteEditText) {
         private const val BULK_SPANS = 500
 
         /**
-         * Code's font. A phone's font setting can replace every family,
-         * monospace included, with one proportional font, in which a backtick
-         * may even have no width; AOSP's Droid Sans Mono is still among the
-         * system fonts.
+         * System font overrides can replace monospace with a proportional font
+         * or hide backticks. Prefer the system's Droid Sans Mono file when available.
          */
         private val MONOSPACE: Typeface by lazy {
             runCatching { Typeface.Builder(File("/system/fonts/DroidSansMono.ttf")).build() }.getOrNull()

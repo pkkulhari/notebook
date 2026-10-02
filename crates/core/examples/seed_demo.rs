@@ -204,7 +204,6 @@ fn add_note(repo: &mut Repository, notebook: &str, body: &str) -> Result<String>
     Ok(note.id)
 }
 
-/// Where the Linux app keeps its database.
 fn data_path() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)

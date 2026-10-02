@@ -6,12 +6,10 @@ import android.view.View
 import android.widget.EditText
 
 /**
- * The editor's text widget. Undo and redo go to the core, whose history
- * undoes only this device's edits, and pasting drops foreign formatting.
+ * Undo uses the core's history of local edits; paste drops foreign formatting.
  *
- * Notes never go to autofill or content capture services. Otherwise every
- * keystroke would send the whole note out of the app, which is both a leak
- * and, for a long note, slow enough to see (and big enough to crash).
+ * Disable autofill and content capture to keep notes private and avoid sending
+ * the entire note to those services on every keystroke.
  */
 class NoteEditText(context: Context, attrs: AttributeSet?) : EditText(context, attrs) {
     init {
@@ -21,7 +19,6 @@ class NoteEditText(context: Context, attrs: AttributeSet?) : EditText(context, a
 
     override fun getAutofillType() = View.AUTOFILL_TYPE_NONE
 
-    /** Runs on every selection or cursor change. */
     var onSelection: (() -> Unit)? = null
 
     /** Runs for undo (`false`) or redo (`true`) from the text menu or a keyboard. */

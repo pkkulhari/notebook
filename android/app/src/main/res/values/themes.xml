@@ -1,6 +1,4 @@
 <resources>
-    <!-- The platform theme follows the system's light or dark mode. The app
-         draws its own top bars, and dark system bar icons suit light mode. -->
     <style name="Theme.Notebook" parent="android:Theme.DeviceDefault.DayNight">
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>

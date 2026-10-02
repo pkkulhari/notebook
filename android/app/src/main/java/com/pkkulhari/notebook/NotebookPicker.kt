@@ -17,13 +17,11 @@ import android.widget.TextView
 import com.pkkulhari.notebook.core.Filter
 import com.pkkulhari.notebook.core.Notebook
 
-/** Choosing what the list shows, and managing notebooks. */
 class NotebookPicker(private val activity: Activity, private val store: Store) {
     private fun dp(value: Int) = TypedValue.applyDimension(
         TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), activity.resources.displayMetrics,
     ).toInt()
 
-    /** All notes, each notebook with its count, and Trash. */
     fun show() {
         val rows = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -91,7 +89,6 @@ class NotebookPicker(private val activity: Activity, private val store: Store) {
         return row
     }
 
-    /** Names a new notebook, or renames `book`. */
     fun askName(book: Notebook?) {
         val field = EditText(activity).apply {
             hint = activity.getString(R.string.notebook_name)
@@ -128,7 +125,6 @@ class NotebookPicker(private val activity: Activity, private val store: Store) {
             .show()
     }
 
-    /** Moves the open note to another notebook. */
     fun move(anchor: View) {
         val note = store.activeNote ?: return
         PopupMenu(activity, anchor).apply {

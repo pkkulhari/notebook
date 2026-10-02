@@ -7,7 +7,6 @@ import android.widget.BaseAdapter
 import android.widget.TextView
 import com.pkkulhari.notebook.core.NoteSummary
 
-/** Rows of the note list: the label, the date, and a preview. */
 class NoteListAdapter(private val inflater: LayoutInflater) : BaseAdapter() {
     var notes: List<NoteSummary> = emptyList()
         set(value) {

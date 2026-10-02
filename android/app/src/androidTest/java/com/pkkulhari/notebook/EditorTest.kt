@@ -13,6 +13,7 @@ import android.view.inputmethod.InputMethodManager
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pkkulhari.notebook.core.Applied
+import com.pkkulhari.notebook.core.Filter
 import com.pkkulhari.notebook.core.TextEdit
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -21,7 +22,6 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** The Markdown editor, driven the way a keyboard drives it. */
 @RunWith(AndroidJUnit4::class)
 class EditorTest {
     private lateinit var scenario: ActivityScenario<MainActivity>
@@ -40,8 +40,7 @@ class EditorTest {
         waitUntil("the store to be ready") { store.ready }
         onMain { store.newNote() }
         id = onMain { store.active!! }
-        // The test plays the keyboard. A real one stays attached to a focused
-        // field and finishes compositions it didn't start, so it's sent away.
+        // Detach the real keyboard so it cannot finish the test's compositions.
         input = onMain {
             context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(text.windowToken, 0)
             text.isFocusable = false
@@ -56,7 +55,6 @@ class EditorTest {
 
     private fun content() = onMain { text.text.toString() }
 
-    /** The text widget and the core's draft hold the same text. */
     private fun assertInStep() = assertEquals(content(), onMain { store.core.draftText(id) })
 
     /** The text as the widget lays it out: with the styling spans. Call on the main thread. */
@@ -114,7 +112,6 @@ class EditorTest {
         onMain { input.commitText("\n", 1) }
         waitUntil("the list to end") { text.text.toString() == "- [ ] item\n" }
         assertInStep()
-        // A hardware Enter key gives one newline and one continuation.
         onMain {
             input.commitText("- one", 1)
             text.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
@@ -149,6 +146,70 @@ class EditorTest {
     }
 
     @Test
+    fun stylingKeepsFollowingEditsAfterRecreation() {
+        onMain { input.commitText("Before\n\n**bold**\n\nAfter", 1) }
+        waitUntil("bold styling") { shown().getSpans(0, text.length(), StyleSpan::class.java).isNotEmpty() }
+        scenario.recreate()
+        scenario.onActivity { text = it.findViewById(R.id.text) }
+        onMain {
+            val span = shown().getSpans(0, text.length(), StyleSpan::class.java).single()
+            val start = shown().getSpanStart(span)
+            val end = shown().getSpanEnd(span)
+            text.text.insert(0, "Added ")
+            // Existing spans must move with typing immediately, before parsing.
+            assertEquals(start + 6, shown().getSpanStart(span))
+            assertEquals(end + 6, shown().getSpanEnd(span))
+            text.text.append("\n\n*new emphasis*")
+        }
+        waitUntil("new formatting after recreation") {
+            shown().getSpans(0, text.length(), StyleSpan::class.java).size == 2
+        }
+        assertInStep()
+    }
+
+    @Test
+    fun trashedNotesRejectUndoAndRedoFromKeyboardAndTextMenu() {
+        onMain { input.commitText("Original", 1) }
+        Thread.sleep(600)
+        onMain {
+            input.commitText(" revised", 1)
+            text.onTextContextMenuItem(android.R.id.undo)
+        }
+        assertEquals("Original", content())
+        onMain {
+            store.trashOrRestore()
+            store.showFilter(Filter.Trash)
+        }
+        waitUntil("the trashed note") { store.notes.any { it.id == id } }
+        onMain { store.openNote(id) }
+        waitUntil("the read-only editor") { store.activeNote?.id == id && store.activeNote?.deleted == true }
+        val shortcuts = listOf(
+            KeyEvent.KEYCODE_Z to KeyEvent.META_CTRL_ON,
+            KeyEvent.KEYCODE_Z to (KeyEvent.META_CTRL_ON or KeyEvent.META_SHIFT_ON),
+            KeyEvent.KEYCODE_Y to KeyEvent.META_CTRL_ON,
+        )
+        for ((key, modifiers) in shortcuts) {
+            scenario.onActivity {
+                assertTrue(it.dispatchKeyEvent(KeyEvent(0L, 0L, KeyEvent.ACTION_DOWN, key, 0, modifiers)))
+            }
+            assertEquals("Original", content())
+            assertInStep()
+        }
+        for (action in listOf(android.R.id.undo, android.R.id.redo)) {
+            onMain { text.onTextContextMenuItem(action) }
+            assertEquals("Original", content())
+            assertInStep()
+        }
+        onMain { store.trashOrRestore() }
+        waitUntil("the note to be restored") { store.activeNote?.deleted == false }
+        onMain { text.onTextContextMenuItem(android.R.id.redo) }
+        assertEquals("Original revised", content())
+        onMain { text.onTextContextMenuItem(android.R.id.undo) }
+        assertEquals("Original", content())
+        assertInStep()
+    }
+
+    @Test
     fun copyingKeepsMarkdownAndPastingDropsFormatting() {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         onMain { input.commitText("Plant **tomatoes**", 1) }
@@ -171,11 +232,7 @@ class EditorTest {
         assertTrue("pasted text kept foreign formatting: $pasted", pasted.isEmpty())
     }
 
-    /**
-     * Logs timings for a 50,000-character note; the bounds only catch something
-     * badly wrong. Typing at the top is the worst case: every styled span after
-     * the cursor costs layout work on each keystroke.
-     */
+    /** Typing at the top shifts every later span, exposing layout regressions. */
     @Test
     fun aLongNoteStaysResponsive() {
         val line = "- [ ] A **task** with _emphasis_ and `code` 🌿\n"
@@ -185,7 +242,6 @@ class EditorTest {
         val inserted = SystemClock.uptimeMillis()
         waitUntil("styling", timeoutMs = 30_000) { hiddenStarts().isNotEmpty() }
         val styled = SystemClock.uptimeMillis()
-        // Typing leaves the styling spans alone: they aren't on the edited text.
         assertTrue(onMain { text.text.getSpans(0, text.length(), MarkdownStyler.HiddenSpan::class.java).isEmpty() })
 
         onMain { text.setSelection(0) }

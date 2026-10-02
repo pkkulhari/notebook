@@ -13,11 +13,7 @@ import com.pkkulhari.notebook.core.ListEnter
 import com.pkkulhari.notebook.core.TextEdit
 import com.pkkulhari.notebook.core.listEnter
 
-/**
- * Keeps a [NoteEditText] and the open note's draft identical. Typing is
- * copied into the draft as it happens; the draft's undos and imported changes
- * are written into the text. Everything runs on the main thread.
- */
+/** Mirrors typing, undo and imported edits between the view and draft on the main thread. */
 class EditorController(private val store: Store, private val text: NoteEditText) : TextWatcher {
     /** The note being edited, or null while the text isn't a draft's. */
     var id: String? = null
@@ -31,6 +27,9 @@ class EditorController(private val store: Store, private val text: NoteEditText)
     private val tick = Runnable { schedule(store.core.tick()) }
 
     init {
+        // The Store restores the draft and cursor. TextView restoration would
+        // replace the Editable and discard the Markdown mirror attached to it.
+        text.isSaveEnabled = false
         text.addTextChangedListener(this)
         text.onSelection = { if (id != null) styler.selectionChanged() }
         text.onUndo = { redo -> if (redo) redo() else undo() }
@@ -97,7 +96,6 @@ class EditorController(private val store: Store, private val text: NoteEditText)
         }
     }
 
-    /** Asks the core to save when it says the next save is due. */
     private fun schedule(wait: Long) {
         handler.removeCallbacks(tick)
         if (wait >= 0) handler.postDelayed(tick, wait)
@@ -133,6 +131,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
 
     private fun undoOrRedo(undo: Boolean) {
         val id = id ?: return
+        if (store.activeNote?.let { it.id == id && !it.deleted } != true) return
         val applied = (if (undo) store.core.undo(id) else store.core.redo(id)) ?: return
         // The keyboard's composing word is gone or changed; let it start over.
         BaseInputConnection.removeComposingSpans(text.text)
@@ -140,7 +139,6 @@ class EditorController(private val store: Store, private val text: NoteEditText)
             text.setSelection(cursor.coerceIn(0, text.length()))
             text.bringPointIntoView(text.selectionStart)
         }
-        // An undo is an edit, and needs saving like one.
         schedule(store.core.tick())
     }
 

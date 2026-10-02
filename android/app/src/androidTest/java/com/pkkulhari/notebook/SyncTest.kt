@@ -12,7 +12,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** The sync screen drives the core, and sync runs only while the app is visible. */
 @RunWith(AndroidJUnit4::class)
 class SyncTest {
     @Test

@@ -16,13 +16,11 @@ open class NotebookApp : Application() {
         store = Store(this, databaseFile(), syncConfigFile(), deviceName())
     }
 
-    /** Backed up with the app's data. */
     protected open fun databaseFile() = File(filesDir, "notebook.db")
 
     /** Never backed up: it holds this device's private sync key. */
     protected open fun syncConfigFile() = File(noBackupFilesDir, "sync.json")
 
-    /** What other devices call this one until someone picks a name. */
     private fun deviceName(): String =
         Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
             ?.takeIf { it.isNotBlank() }

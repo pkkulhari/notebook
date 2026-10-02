@@ -26,13 +26,14 @@ val context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
 fun temporaryDirectory(): File = File(context.cacheDir, "test-${System.nanoTime()}").apply { mkdirs() }
 
-/** What the store asked its activity to show. */
 class Recorder : Store.Listener {
     var opened: NoteInfo? = null
     var text = ""
     var closed = 0
 
     override fun listChanged() {}
+
+    override fun queryChanged() {}
 
     override fun opened(note: NoteInfo, text: String, cursor: Int, focus: Boolean) {
         opened = note

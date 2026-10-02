@@ -165,7 +165,6 @@ impl MarkdownDocument {
             })
     }
 
-    /// Lists don't continue inside code blocks.
     pub fn in_code_block(&self, position: i32) -> bool {
         self.document
             .spans

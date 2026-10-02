@@ -18,11 +18,7 @@ import com.pkkulhari.notebook.core.SyncStatus
 import java.io.File
 import java.util.UUID
 
-/**
- * The app's state, kept on the main thread and updated from the core's
- * events. It outlives activities, so rotation, dark mode and the activity
- * being destroyed in the background lose nothing.
- */
+/** Main-thread UI state retained across activity recreation. */
 class Store(
     private val context: Context,
     database: File,
@@ -34,10 +30,11 @@ class Store(
         /** The note list, its title, the notebooks or the counts changed. */
         fun listChanged()
 
-        /** Show the editor with this note's draft. */
+        /** The search query was applied or reset; cancel any pending search. */
+        fun queryChanged()
+
         fun opened(note: NoteInfo, text: String, cursor: Int, focus: Boolean)
 
-        /** Show the list. */
         fun closed()
 
         /** The open note moved, or was trashed or restored. */
@@ -91,7 +88,6 @@ class Store(
     /** Whether an activity is showing; sync runs only then. */
     private var visible = false
 
-    /** Every note whose draft is open in the core. */
     private val drafts = mutableMapOf<String, NoteInfo>()
     private var listGeneration = 0L
     private var loadGeneration = 0L
@@ -231,8 +227,6 @@ class Store(
         listener?.problemChanged()
     }
 
-    // The list
-
     private fun requestList() {
         if (!ready) return
         listStale = false
@@ -247,6 +241,7 @@ class Store(
     }
 
     fun showFilter(filter: Filter) {
+        cancelPendingLoad()
         this.filter = filter
         listener?.listChanged()
         requestList()
@@ -256,31 +251,38 @@ class Store(
     fun search(query: String) {
         if (query == this.query) return
         this.query = query
+        listener?.queryChanged()
         listener?.listChanged()
         requestList()
     }
 
-    // The editor
+    /** Navigation supersedes a load even when it doesn't request another one. */
+    fun cancelPendingLoad() {
+        loadGeneration += 1
+    }
 
     fun openNote(id: String) {
+        cancelPendingLoad()
         core.flush()
         val note = drafts[id]
         val text = core.draftText(id)
         if (note != null && text != null) {
             show(note, text, 0, focus = false)
         } else {
-            loadGeneration += 1
             core.load(id, loadGeneration)
         }
     }
 
-    /** Starts a note in the Default notebook, as the desktop does. */
+    /** Creates a note in Default, regardless of the current filter. */
     fun newNote() {
+        cancelPendingLoad()
         core.flush()
         val note = core.createNote()
         drafts[note.id] = note
         filter = Filter.Notebook(defaultNotebookId)
         query = ""
+        // Notify even when already empty: the widget may have a pending search.
+        listener?.queryChanged()
         show(note, "", 0, focus = true)
     }
 
@@ -292,8 +294,8 @@ class Store(
         listener?.opened(note, text, cursor, focus)
     }
 
-    /** Back to the list. */
     fun closeNote() {
+        cancelPendingLoad()
         if (active == null) return
         core.flush()
         active = null
@@ -304,8 +306,8 @@ class Store(
 
     /** Opens the note again from storage, when the editor and its draft disagree. */
     fun reload(id: String) {
+        cancelPendingLoad()
         core.flush()
-        loadGeneration += 1
         core.load(id, loadGeneration)
     }
 
@@ -327,8 +329,6 @@ class Store(
         core.mutate(Mutation.Move(id, notebookId))
     }
 
-    // Notebooks
-
     fun createNotebook(name: String) {
         core.mutate(Mutation.CreateNotebook(UUID.randomUUID().toString(), name))
     }
@@ -343,8 +343,6 @@ class Store(
         core.mutate(Mutation.DeleteNotebook(id))
     }
 
-    // Problems
-
     fun retry() {
         setProblem(null)
         core.retry()
@@ -352,11 +350,7 @@ class Store(
 
     fun dismissProblem() = setProblem(null)
 
-    /**
-     * Sync runs while the app is visible: peer-to-peer sync needs both apps
-     * open anyway, and Android restricts networking in the background. A
-     * suspended device catches up when it resumes.
-     */
+    /** Suspend background networking without disabling sync; resume catches up. */
     fun foreground(visible: Boolean) {
         if (visible == this.visible) return
         this.visible = visible
@@ -372,7 +366,6 @@ class Store(
         }
     }
 
-    /** Sends every unsaved edit, and remembers where the app was. */
     fun pause() {
         core.flush()
         core.savePreferences(active, cursor)

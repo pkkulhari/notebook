@@ -768,7 +768,6 @@ fn effective_notebook(db: &Connection, home: &str, default_notebook_id: &str) ->
     .into())
 }
 
-/// Writes a note document's current state into the tables the app queries.
 fn project_note(
     tx: &Transaction<'_>,
     id: &str,
@@ -1158,7 +1157,6 @@ pub fn spawn_worker(path: PathBuf) -> (Sender<Command>, Receiver<Event>) {
                 // The editor's copies must see every change before anything acts on them.
                 if let Some(repo) = repository.as_mut() {
                     for change in repo.take_changes() {
-                        // The editor's copy skips the changes it already has.
                         if change.kind == Kind::Note {
                             let _ = outgoing.send(Event::NoteDelta {
                                 id: change.id.clone(),

@@ -2707,7 +2707,6 @@ mod tests {
         ui.trash_or_restore();
         pump_until(|| ui.state.borrow().active.as_deref() != Some(second.as_str()));
         assert!(ui.editor.is_editable());
-        // Reopen the trashed note explicitly to exercise restoration.
         ui.open_note(&second);
         assert!(!ui.editor.is_editable());
         ui.trash_or_restore();
@@ -2745,7 +2744,6 @@ mod tests {
         pump_until(|| ui.state.borrow().parsed_generation == ui.state.borrow().parse_generation);
         assert_block_alignment(&ui, block_sample);
         let normal_margin = ui.editor.left_margin();
-        // Resize with another buffer open, then return to the cached Markdown note.
         ui.open_note(&second);
         gtk::prelude::WidgetExt::activate_action(&ui.window, "win.focus", None).unwrap();
         pump_until(|| ui.editor.left_margin() > normal_margin);
@@ -2875,8 +2873,6 @@ mod tests {
         assert!(ui.sync_button.has_css_class("sync-active"));
         shoot("sync-paired.png");
 
-        // A note written on the laptop appears in the list, and edits to it
-        // arrive in the open editor.
         let note = Note::blank();
         laptop.send(Command::Create(note.clone())).unwrap();
         let save = |body: &str| {
@@ -2983,7 +2979,6 @@ mod tests {
             .iter()
             .map(|n| n.id.clone())
             .collect();
-        // Middle -> next, last -> previous, first -> next, only -> empty.
         for (deleted, expected, remaining) in [
             (&ids[1], Some(&ids[2]), 3),
             (&ids[3], Some(&ids[2]), 2),

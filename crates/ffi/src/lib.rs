@@ -49,7 +49,6 @@ pub struct Core {
     sync: SyncHandle,
 }
 
-/// What both the caller's threads and the event thread touch.
 struct Shared {
     drafts: Mutex<Drafts>,
     /// Commands that failed and can be sent again, one per kind and note.
@@ -97,8 +96,6 @@ impl Core {
             sync,
         })
     }
-
-    // Storage
 
     /// Opens the database. `Ready` follows.
     pub fn initialize(&self) {
@@ -171,7 +168,6 @@ impl Core {
         self.send_drafts();
     }
 
-    /// Whether any failed command is waiting for `retry`.
     pub fn has_failures(&self) -> bool {
         !self.shared.failed.lock().unwrap().is_empty()
     }
@@ -248,8 +244,6 @@ impl Core {
     pub fn trim_drafts(&self, active: Option<String>) -> Vec<String> {
         self.drafts().trim(active.as_deref())
     }
-
-    // Sync
 
     pub fn sync(&self, control: SyncControl) {
         self.sync.send(control.into());

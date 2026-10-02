@@ -236,7 +236,6 @@ fn devices_pair_with_a_code_and_sync_both_ways() {
                 .is_some_and(|a| a.ip_addrs().next().is_some())
         });
     }
-    // Stand in for the local network: each learns where the other is.
     laptop
         .sync()
         .send(Control::Introduce(desktop.status.addr.clone().unwrap()));
@@ -278,7 +277,6 @@ fn devices_pair_with_a_code_and_sync_both_ways() {
     laptop.save(&note.id, "Written on the desktop, finished on the laptop");
     desktop.wait_body(&note.id, "Written on the desktop, finished on the laptop");
 
-    // Both edit at once; each keeps the other's words.
     desktop.save(
         &note.id,
         "Lately: Written on the desktop, finished on the laptop",
@@ -288,7 +286,6 @@ fn devices_pair_with_a_code_and_sync_both_ways() {
     desktop.wait_body(&note.id, merged);
     laptop.wait_body(&note.id, merged);
 
-    // A forgotten device can no longer connect.
     let laptop_id = desktop.status.devices[0].id.clone();
     desktop.sync().send(Control::Forget(laptop_id));
     desktop.wait("forgetting", |s| s.devices.is_empty());
@@ -428,7 +425,6 @@ fn settings_change_while_suspended_without_binding() {
     device.wait("sync to start", Status::running);
     device.sync().send(Control::Suspend(true));
     device.wait("suspending", |s| s.suspended && !s.running());
-    // A network change with nothing bound does nothing.
     device.sync().send(Control::NetworkChanged);
     let relay = "https://relay.example.org./";
     device.sync().send(Control::SetRelay(Some(relay.into())));
@@ -495,11 +491,9 @@ fn statuses_arrive_through_the_callback_and_the_name_defaults_once() {
     assert_eq!(sync::Config::load(&config).device_name, "Pixel 9");
     handle.send(Control::SetDeviceName("Kitchen tablet".into()));
     wait(&seen, &|s| s.device_name == "Kitchen tablet");
-    // Only changes are reported.
     assert!(seen.lock().unwrap().windows(2).all(|w| w[0] != w[1]));
     drop(handle);
 
-    // A chosen name outlasts the default.
     let (_handle, seen) = start("Pixel 9");
     wait(&seen, &|_| true);
     assert_eq!(seen.lock().unwrap()[0].device_name, "Kitchen tablet");

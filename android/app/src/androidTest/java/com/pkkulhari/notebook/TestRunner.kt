@@ -5,7 +5,6 @@ import android.content.Context
 import androidx.test.runner.AndroidJUnitRunner
 import java.io.File
 
-/** Starts [TestApp] instead of the real application. */
 class TestRunner : AndroidJUnitRunner() {
     override fun newApplication(loader: ClassLoader, name: String, context: Context): Application =
         super.newApplication(loader, TestApp::class.java.name, context)

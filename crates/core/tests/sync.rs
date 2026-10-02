@@ -68,7 +68,6 @@ fn concurrent_edits_to_one_note_keep_both_sides() {
     assert_eq!(merged, "Hello brave world!");
     assert_eq!(visible(&a), visible(&b));
     assert_eq!(a.digest().unwrap(), b.digest().unwrap());
-    // A converged pair has nothing left to send.
     assert_eq!(reconcile(&a, &mut b, "a"), 0);
     assert_eq!(reconcile(&b, &mut a, "b"), 0);
 }
@@ -147,7 +146,6 @@ fn notebooks_created_apart_with_one_name_are_both_kept() {
     let names: Vec<_> = a.notebooks().unwrap().into_iter().map(|b| b.name).collect();
     assert_eq!(names, ["Default", "Work", "Work (2)"]);
     assert_eq!(visible(&a), visible(&b));
-    // The duplicate can still be renamed, and names stay unique locally.
     let second = a.notebooks().unwrap()[2].id.clone();
     a.mutate(&Mutation::RenameNotebook {
         id: second,
@@ -426,7 +424,6 @@ fn random_edits_on_three_devices_converge() {
                 "seed {seed}"
             );
         }
-        // Reopening rebuilds the same state from what was saved.
         drop(devices);
         let reopened = open(dir.path(), "0.db");
         assert_eq!(visible(&reopened), first, "seed {seed}: reopened");

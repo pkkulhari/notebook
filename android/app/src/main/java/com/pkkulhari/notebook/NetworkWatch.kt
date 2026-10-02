@@ -9,9 +9,8 @@ import android.os.Handler
 import android.os.Looper
 
 /**
- * What sync needs from Android while the app is visible: word of network
- * changes, which iroh can't see on Android, and a multicast lock, without
- * which many phones drop the mDNS packets devices find each other with.
+ * Forward network changes that iroh cannot observe on Android. The multicast
+ * lock prevents phones from dropping mDNS discovery packets.
  */
 class NetworkWatch(context: Context, private val onChange: () -> Unit) {
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
@@ -49,7 +48,6 @@ class NetworkWatch(context: Context, private val onChange: () -> Unit) {
         watching = false
     }
 
-    /** Holds the multicast lock while `held`. */
     fun multicast(held: Boolean) {
         if (held && !lock.isHeld) lock.acquire()
         if (!held && lock.isHeld) lock.release()

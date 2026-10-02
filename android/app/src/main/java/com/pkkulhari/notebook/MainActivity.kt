@@ -27,7 +27,6 @@ import android.window.OnBackInvokedDispatcher
 import com.pkkulhari.notebook.core.Applied
 import com.pkkulhari.notebook.core.NoteInfo
 
-/** The only activity: the note list, or the editor. */
 class MainActivity : Activity(), Store.Listener {
     private val store get() = (application as NotebookApp).store
 
@@ -96,7 +95,7 @@ class MainActivity : Activity(), Store.Listener {
             override fun onTextChanged(s: CharSequence, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable) {
                 handler.removeCallbacks(runSearch)
-                handler.postDelayed(runSearch, SEARCH_DELAY_MS)
+                if (s.toString() != store.query) handler.postDelayed(runSearch, SEARCH_DELAY_MS)
             }
         })
         findViewById<View>(R.id.back).setOnClickListener { store.closeNote() }
@@ -149,7 +148,6 @@ class MainActivity : Activity(), Store.Listener {
         store.pause()
     }
 
-    /** System bars and the keyboard never cover the content. */
     private fun applyInsets() {
         val root = findViewById<View>(R.id.root)
         root.setOnApplyWindowInsetsListener { view, insets ->
@@ -160,7 +158,10 @@ class MainActivity : Activity(), Store.Listener {
         }
     }
 
-    // Store.Listener
+    override fun queryChanged() {
+        handler.removeCallbacks(runSearch)
+        if (search.text.toString() != store.query) search.setText(store.query)
+    }
 
     override fun listChanged() {
         listTitle.text = store.title()
@@ -192,7 +193,6 @@ class MainActivity : Activity(), Store.Listener {
         listChanged()
     }
 
-    /** Back closes the sync screen or the editor; from the list it leaves the app. */
     private fun goBack() {
         if (syncScreen.visibility == View.VISIBLE) showSync(false) else store.closeNote()
     }
@@ -208,6 +208,7 @@ class MainActivity : Activity(), Store.Listener {
     }
 
     private fun showSync(show: Boolean) {
+        if (show) store.cancelPendingLoad()
         syncScreen.visibility = if (show) View.VISIBLE else View.GONE
         listScreen.visibility = if (show || editorScreen.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         if (show) sync.update() else getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(syncScreen.windowToken, 0)
@@ -268,7 +269,6 @@ class MainActivity : Activity(), Store.Listener {
             else -> getString(R.string.syncing_with_many, connected.size)
         }
         syncButton.tooltipText = syncButton.contentDescription
-        // Lit while syncing with at least one device, like the desktop's button.
         syncButton.imageTintList = ColorStateList.valueOf(
             getColor(if (connected.isNotEmpty()) android.R.color.system_accent1_500 else android.R.color.system_neutral1_500),
         )
@@ -279,7 +279,7 @@ class MainActivity : Activity(), Store.Listener {
         try {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
         } catch (_: ActivityNotFoundException) {
-            // Nothing on this device opens it.
+            // No installed handler; leave the note open.
         }
     }
 

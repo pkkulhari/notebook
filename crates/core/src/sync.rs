@@ -828,7 +828,6 @@ impl Sync {
         }
     }
 
-    /// Dials paired devices that aren't connected, and expires pairing codes.
     fn tick(&mut self) {
         let expired = self
             .offer
@@ -1193,7 +1192,6 @@ async fn join(
                 _ => {}
             }
         }
-        // Every device showing a code turned this one down.
         if wrong {
             break;
         }

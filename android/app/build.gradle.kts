@@ -5,16 +5,13 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
-/** The Cargo workspace, one level above this Gradle project. */
 val workspaceDir: File = rootDir.parentFile
 
-/** The Linux and Android apps share the workspace's version number. */
 val workspaceVersion: String = Regex("\\[workspace\\.package][^\\[]*?\\bversion = \"([^\"]+)\"")
     .find(File(workspaceDir, "Cargo.toml").readText())
     ?.groupValues?.get(1)
     ?: error("No [workspace.package] version in Cargo.toml")
 
-/** 1.2.3 is 10203, so every release counts up. */
 val versionNumber: Int = workspaceVersion.split(".").map(String::toInt).let { (major, minor, patch) ->
     major * 10_000 + minor * 100 + patch
 }
@@ -91,7 +88,6 @@ android {
     }
 }
 
-/** Inputs every Rust task shares: a change anywhere in the workspace's crates. */
 fun rustSources(): FileTree = fileTree(workspaceDir) {
     include("crates/**/*.rs", "crates/**/Cargo.toml", "crates/**/uniffi.toml", "Cargo.toml", "Cargo.lock")
 }
@@ -128,7 +124,6 @@ abstract class CargoNdkBuild : DefaultTask() {
             environment("ANDROID_NDK_HOME", ndkDirectory.get())
             commandLine(
                 listOf(cargo.get(), "ndk") + abis.flatMap { listOf("-t", it) } +
-                    // cargo-ndk defaults to API 21.
                     listOf("-P", "35", "build", "-p", "notebook-ffi", "--lib", "--profile", profile.get()) +
                     features.get().flatMap { listOf("--features", it) },
             )
@@ -200,7 +195,6 @@ androidComponents {
             ndkDirectory.set(androidComponents.sdkComponents.ndkDirectory.map { it.asFile.path })
             profile.set(if (release) "android" else "dev")
             abis.set(if (release) releaseAbis else listOf("arm64-v8a", "x86_64"))
-            // Rust logs and panics in logcat, for debug builds only.
             features.set(if (release) emptyList() else listOf("logcat"))
             outputDirectory.set(layout.buildDirectory.dir("rustJniLibs/${variant.name}"))
         }

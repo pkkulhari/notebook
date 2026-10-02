@@ -16,12 +16,10 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** The Rust core loads, saves, and reads back on a real device. */
 @RunWith(AndroidJUnit4::class)
 class CoreSmokeTest {
     private lateinit var dir: File
 
-    /** Collects events from the core's threads. */
     private class Events : CoreListener {
         val queue = LinkedBlockingQueue<CoreEvent>()
 

@@ -1,6 +1,5 @@
 package com.pkkulhari.notebook
 
-
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pkkulhari.notebook.core.Filter
 import java.io.File
@@ -12,7 +11,6 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** The app shell's behaviour, through the store and a real EditText. */
 @RunWith(AndroidJUnit4::class)
 class StoreTest {
     private lateinit var dir: File
@@ -39,7 +37,6 @@ class StoreTest {
         return store to view
     }
 
-    /** Writes a note the way a person does: new note, type, back. */
     private fun write(store: Store, view: Recorder, body: String): String {
         val text = onMain { NoteEditText(context, null) }
         onMain { store.newNote() }
@@ -76,6 +73,51 @@ class StoreTest {
         assertEquals(id, onMain { again.opened!!.id })
         assertEquals("Written on a phone 🌿", onMain { again.text })
         assertEquals("Written on a phone 🌿".length, onMain { second.cursor })
+    }
+
+    /** Queue navigation before the main thread can handle a storage response. */
+    private fun assertPendingLoadIgnored(navigate: (Store, String) -> Unit) {
+        val (store, view) = start()
+        val cached = write(store, view, "Cached note")
+        // Create a stored note without opening it through this Store.
+        val uncached = onMain {
+            store.core.createNote().also {
+                store.core.replace(it.id, 0, 0, "Uncached note")
+                store.core.flush()
+            }.id
+        }
+        waitUntil("the uncached note to be saved") { store.notes.any { it.id == uncached && it.label == "Uncached note" } }
+        val expected = onMain {
+            store.openNote(uncached)
+            navigate(store, cached)
+            // Storage handles commands in order. This mutation's callback is
+            // a barrier after the Loaded callback, without a timing assumption.
+            store.createNotebook("Navigation complete")
+            store.active
+        }
+        waitUntil("the pending load to finish") { store.notebooks.any { it.name == "Navigation complete" } }
+        assertEquals(expected, onMain { store.active })
+        assertEquals(expected, onMain { view.opened?.id })
+    }
+
+    @Test
+    fun cachedOpenSupersedesPendingLoad() = assertPendingLoadIgnored { store, cached ->
+        store.openNote(cached)
+    }
+
+    @Test
+    fun newNoteSupersedesPendingLoad() = assertPendingLoadIgnored { store, _ ->
+        store.newNote()
+    }
+
+    @Test
+    fun closingBeforeALoadFinishesKeepsTheListOpen() = assertPendingLoadIgnored { store, _ ->
+        store.closeNote()
+    }
+
+    @Test
+    fun changingFilterSupersedesPendingLoad() = assertPendingLoadIgnored { store, _ ->
+        store.showFilter(Filter.Trash)
     }
 
     @Test

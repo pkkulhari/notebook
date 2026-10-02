@@ -55,7 +55,6 @@ pub enum Units {
 }
 
 impl Units {
-    /// The width of one character.
     pub fn width(self, ch: char) -> usize {
         match self {
             Units::Chars => 1,
@@ -63,7 +62,6 @@ impl Units {
         }
     }
 
-    /// The length of `text`.
     pub fn count(self, text: &str) -> usize {
         match self {
             Units::Chars => text.chars().count(),
