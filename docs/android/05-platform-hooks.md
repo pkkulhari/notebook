@@ -1,6 +1,6 @@
 # 5. Platform hooks in core
 
-**Status:** Not started
+**Status:** Done
 **Needs:** step 2 (and step 1's findings)
 **Behaviour change:** none on desktop
 
@@ -99,4 +99,14 @@ Dropping the old `Session` aborts its task. Nothing is lost, because the new ses
 
 ## Notes
 
-_Anything surprising goes here._
+- **Linux paths and the hostname** are now in `crates/gtk/src/system.rs`. `seed_demo` builds the default database path itself, since core no longer knows it.
+- **The default device name is saved on first start.** On the desktop, `sync.json` (mode 0600) now exists from the first launch, not only after sync is turned on. A name the person picks is never overwritten.
+- **The status callback runs on the sync thread.** GTK sends each status into its own channel and polls it every 16 ms as before. `SyncHandle` is now only a sender.
+- **Suspending** also cancels a pairing in progress, and `StartPairing` while suspended reports "Turn on sync first", as it does when sync is off. On resume, the device binds a new port, so on a LAN it relies on mDNS to be found again. The tests stand in for mDNS with `Introduce`.
+- **Testing a restart needs a real process.**
+  - In one process, two live endpoints with the same key confuse iroh, which routes by endpoint ID. Packets for the new connection can reach the old socket.
+  - So the test runs the first laptop in a child process (the ignored `child_device` test, started by the test binary itself), SIGKILLs it, and restarts the laptop in-process. The new connection replaces the dead session in about 40 ms.
+  - The test gives the laptop the larger ID, so the old rule (keep the connection the smaller ID dialed) would reject the new connection whichever device dialed first.
+  - Mutation-checked: with the old `adopt`, both cases fail.
+- **Test 3's "while disconnected" half** has no separate test. `NetworkChanged` calls the same `tick()` the 10 s redial timer uses, and the spike measured the effect on a phone (1.5 s → 0.6 s).
+- **Results:** `cargo test` passes (7 network tests, 4 ignored). The ignored relay tests pass against n0's public relay, and `desktop_workflow` passes under Xvfb.

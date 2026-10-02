@@ -2,7 +2,7 @@
 //! cargo run --release --example seed_demo -- --reset [database-path]
 use notebook_core::{
     model::*,
-    storage::{self, Mutation, Repository, Result},
+    storage::{Mutation, Repository, Result},
 };
 use std::{collections::HashMap, path::PathBuf};
 
@@ -11,10 +11,7 @@ fn main() -> Result<()> {
     if args.is_empty() || args[0] != "--reset" || args.len() > 2 {
         return Err("Close Notebook, then run: cargo run --release --example seed_demo -- --reset [database-path]".into());
     }
-    let path = args
-        .get(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(storage::data_path);
+    let path = args.get(1).map(PathBuf::from).unwrap_or_else(data_path);
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -205,4 +202,14 @@ fn add_note(repo: &mut Repository, notebook: &str, body: &str) -> Result<String>
         })?;
     }
     Ok(note.id)
+}
+
+/// Where the Linux app keeps its database.
+fn data_path() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("notebook/notebook.db")
 }

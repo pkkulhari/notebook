@@ -38,6 +38,10 @@ const MAX_FRAME: usize = 64 << 20;
 const RESYNC: Duration = Duration::from_secs(60);
 const REDIAL: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
+/// A second connection from a device within this long of the first means both
+/// dialed at once. Later, it means the device lost the first, usually because
+/// its app restarted.
+const SIMULTANEOUS_DIAL: Duration = Duration::from_secs(5);
 const PAIRING_TIME: Duration = Duration::from_secs(300);
 const JOIN_TIME: Duration = Duration::from_secs(30);
 const PAIRING_ATTEMPTS: u32 = 3;
@@ -66,18 +70,10 @@ pub struct PairedDevice {
 
 impl Config {
     pub fn load(path: &Path) -> Self {
-        let mut config: Config = std::fs::read_to_string(path)
+        std::fs::read_to_string(path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        if config.device_name.trim().is_empty() {
-            config.device_name = std::fs::read_to_string("/proc/sys/kernel/hostname")
-                .map(|name| name.trim().to_string())
-                .ok()
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| "This computer".into());
-        }
-        config
+            .unwrap_or_default()
     }
 
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
@@ -109,13 +105,12 @@ impl Config {
     }
 }
 
-pub fn config_path() -> PathBuf {
-    storage::xdg_path("XDG_CONFIG_HOME", ".config", "notebook/sync.json")
-}
-
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Status {
     pub enabled: bool,
+    /// Paused by the app, such as while it's in the background. Sync stays
+    /// enabled, and resumes where it left off.
+    pub suspended: bool,
     pub device_name: String,
     pub relay_url: Option<String>,
     pub relay_connected: bool,
@@ -161,22 +156,21 @@ pub enum Control {
     Forget(String),
     /// Adds an address for a device, as if found on the local network.
     Introduce(EndpointAddr),
+    /// Closes or reopens every connection without changing the settings.
+    Suspend(bool),
+    /// The device's network changed. iroh can't notice this by itself on
+    /// Android.
+    NetworkChanged,
     Shutdown,
 }
 
 pub struct SyncHandle {
     control: UnboundedSender<Control>,
-    status: std::sync::mpsc::Receiver<Status>,
 }
 
 impl SyncHandle {
     pub fn send(&self, control: Control) {
         let _ = self.control.send(control);
-    }
-
-    /// The newest status since the last call, if it changed.
-    pub fn status(&self) -> Option<Status> {
-        self.status.try_iter().last()
     }
 }
 
@@ -203,14 +197,19 @@ impl Default for Options {
 }
 
 /// Starts the sync thread. It only touches the network while sync is enabled.
+///
+/// `default_device_name` names this device until someone picks a name.
+/// `on_status` runs on the sync thread with each new status, starting with
+/// the first.
 pub fn spawn(
     config_path: PathBuf,
     db_path: PathBuf,
+    default_device_name: String,
     storage: std::sync::mpsc::Sender<Command>,
+    on_status: impl Fn(Status) + Send + 'static,
     options: Options,
 ) -> SyncHandle {
     let (control, control_rx) = mpsc::unbounded_channel();
-    let (status_tx, status) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("notebook-sync".into())
         .spawn(move || {
@@ -222,7 +221,11 @@ pub fn spawn(
             runtime.block_on(async move {
                 let (internal, internal_rx) = mpsc::unbounded_channel();
                 let (outbox, changes) = mpsc::unbounded_channel();
-                let config = Config::load(&config_path);
+                let mut config = Config::load(&config_path);
+                let unnamed = config.device_name.trim().is_empty();
+                if unnamed {
+                    config.device_name = default_device_name;
+                }
                 let mut sync = Sync {
                     allowed: Arc::new(RwLock::new(
                         config
@@ -235,7 +238,7 @@ pub fn spawn(
                     config_path,
                     reader: Reader::new(db_path),
                     storage,
-                    status_tx,
+                    on_status: Box::new(on_status),
                     last_status: None,
                     internal,
                     outbox,
@@ -249,12 +252,16 @@ pub fn spawn(
                     pairing: Pairing::Idle,
                     joining: None,
                     problem: None,
+                    suspended: false,
                 };
+                if unnamed {
+                    sync.save_config();
+                }
                 sync.run(control_rx, internal_rx, changes).await;
             });
         })
         .expect("could not start the sync thread");
-    SyncHandle { control, status }
+    SyncHandle { control }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -368,6 +375,7 @@ struct Session {
     outgoing: UnboundedSender<Msg>,
     id: usize,
     dialer: EndpointId,
+    started: Instant,
     _task: AbortOnDropHandle<()>,
 }
 
@@ -381,7 +389,7 @@ struct Sync {
     config_path: PathBuf,
     reader: Reader,
     storage: std::sync::mpsc::Sender<Command>,
-    status_tx: std::sync::mpsc::Sender<Status>,
+    on_status: Box<dyn Fn(Status) + Send>,
     last_status: Option<Status>,
     internal: UnboundedSender<Internal>,
     outbox: storage::Outbox,
@@ -397,6 +405,7 @@ struct Sync {
     pairing: Pairing,
     joining: Option<AbortOnDropHandle<()>>,
     problem: Option<String>,
+    suspended: bool,
 }
 
 impl Sync {
@@ -567,7 +576,7 @@ impl Sync {
 
     async fn restart(&mut self) {
         self.stop().await;
-        if self.config.enabled {
+        if self.config.enabled && !self.suspended {
             self.start().await;
         }
     }
@@ -658,6 +667,20 @@ impl Sync {
                     .insert(addr.id, (addr, true));
                 self.tick();
             }
+            Control::Suspend(suspend) => {
+                if suspend != self.suspended {
+                    self.suspended = suspend;
+                    // Each new session starts by comparing digests, which
+                    // catches up on everything changed while suspended.
+                    self.restart().await;
+                }
+            }
+            Control::NetworkChanged => {
+                if let Some(node) = &self.node {
+                    node.endpoint.network_change().await;
+                }
+                self.tick();
+            }
             Control::Shutdown => {}
         }
     }
@@ -726,13 +749,17 @@ impl Sync {
     }
 
     /// When both devices dialed at once, each keeps the connection dialed by
-    /// the smaller ID, so they agree.
+    /// the smaller ID, so they agree. A connection from a device that already
+    /// has an older session replaces it: the device lost that session, and
+    /// otherwise would wait for it to time out.
     fn adopt(&mut self, conn: Connection, dialer: EndpointId) {
         let Some(node) = &self.node else {
             return;
         };
         let (me, peer) = (node.endpoint.id(), conn.remote_id());
-        if let Some(existing) = self.sessions.get(&peer) {
+        if let Some(existing) = self.sessions.get(&peer)
+            && existing.started.elapsed() < SIMULTANEOUS_DIAL
+        {
             let preferred = me.min(peer);
             if existing.dialer == preferred || dialer != preferred {
                 conn.close(0u32.into(), b"duplicate");
@@ -777,6 +804,7 @@ impl Sync {
                 outgoing,
                 id,
                 dialer,
+                started: Instant::now(),
                 _task: AbortOnDropHandle::new(task),
             },
         );
@@ -855,6 +883,7 @@ impl Sync {
     fn publish(&mut self) {
         let status = Status {
             enabled: self.config.enabled,
+            suspended: self.suspended,
             device_name: self.config.device_name.clone(),
             relay_url: self.config.relay_url.clone(),
             relay_connected: self.node.as_ref().is_some_and(|node| {
@@ -899,7 +928,7 @@ impl Sync {
             }),
         };
         if self.last_status.as_ref() != Some(&status) {
-            let _ = self.status_tx.send(status.clone());
+            (self.on_status)(status.clone());
             self.last_status = Some(status);
         }
     }
@@ -1263,7 +1292,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notebook/sync.json");
         let mut config = Config::load(&path);
-        assert!(!config.device_name.is_empty());
+        assert!(config.device_name.is_empty());
         let (key, created) = config.key();
         assert!(created);
         config.save(&path).unwrap();

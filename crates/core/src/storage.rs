@@ -966,23 +966,6 @@ fn journal_note(tx: &Transaction<'_>, id: &str, operation: &str) -> rusqlite::Re
     journal(tx, "note", id, operation, rev)
 }
 
-pub fn data_path() -> PathBuf {
-    xdg_path("XDG_DATA_HOME", ".local/share", "notebook/notebook.db")
-}
-
-pub(crate) fn xdg_path(var: &str, fallback: &str, file: &str) -> PathBuf {
-    let root = std::env::var_os(var)
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(fallback)
-        });
-    root.join(file)
-}
-
 #[derive(Clone, Debug)]
 pub enum Mutation {
     CreateNotebook { id: String, name: String },

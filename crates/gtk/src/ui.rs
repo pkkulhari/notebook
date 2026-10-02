@@ -101,6 +101,7 @@ pub(crate) struct Ui {
     parse_results: Receiver<(u64, Document)>,
     state: RefCell<State>,
     sync: SyncHandle,
+    sync_statuses: Receiver<sync::Status>,
     sync_status: RefCell<sync::Status>,
     sync_button: gtk::Button,
     sync_dialog: RefCell<Option<SyncDialog>>,
@@ -116,8 +117,9 @@ pub(crate) struct Ui {
 pub(crate) fn launch(app: &gtk::Application) -> Rc<Ui> {
     build(
         app,
-        storage::data_path(),
-        sync::config_path(),
+        crate::system::data_path(),
+        crate::system::config_path(),
+        crate::system::device_name(),
         sync::Options::default(),
     )
 }
@@ -126,10 +128,21 @@ fn build(
     app: &gtk::Application,
     path: std::path::PathBuf,
     sync_config: std::path::PathBuf,
+    device_name: String,
     sync_options: sync::Options,
 ) -> Rc<Ui> {
     let (commands, events) = storage::spawn_worker(path.clone());
-    let sync = sync::spawn(sync_config, path, commands.clone(), sync_options);
+    let (statuses, sync_statuses) = mpsc::channel();
+    let sync = sync::spawn(
+        sync_config,
+        path,
+        device_name,
+        commands.clone(),
+        move |status| {
+            let _ = statuses.send(status);
+        },
+        sync_options,
+    );
     let (parse_requests, incoming) = mpsc::channel::<(u64, String)>();
     let (outgoing, parse_results) = mpsc::channel();
     std::thread::Builder::new()
@@ -476,6 +489,7 @@ fn build(
         commands,
         events,
         sync,
+        sync_statuses,
         sync_status: RefCell::new(sync::Status::default()),
         sync_button,
         sync_dialog: RefCell::new(None),
@@ -1458,7 +1472,7 @@ impl Ui {
         while let Ok(event) = self.events.try_recv() {
             self.handle(event);
         }
-        if let Some(status) = self.sync.status() {
+        if let Some(status) = self.sync_statuses.try_iter().last() {
             *self.sync_status.borrow_mut() = status;
             self.update_sync_button();
             self.update_sync_dialog();
@@ -2424,6 +2438,7 @@ mod tests {
             app,
             path,
             config,
+            "Desktop".into(),
             sync::Options {
                 mdns: false,
                 ..Default::default()
@@ -2782,15 +2797,17 @@ mod tests {
 
         let laptop_db = dir.path().join("laptop.db");
         let laptop_config = dir.path().join("laptop.json");
-        let mut settings = sync::Config::load(&laptop_config);
-        settings.device_name = "Laptop".into();
-        settings.save(&laptop_config).unwrap();
         let (laptop, _laptop_events) = storage::spawn_worker(laptop_db.clone());
         laptop.send(Command::Initialize).unwrap();
+        let (statuses, laptop_statuses) = mpsc::channel();
         let laptop_sync = sync::spawn(
             laptop_config,
             laptop_db.clone(),
+            "Laptop".into(),
             laptop.clone(),
+            move |status| {
+                let _ = statuses.send(status);
+            },
             sync::Options {
                 mdns: false,
                 ..Default::default()
@@ -2798,7 +2815,7 @@ mod tests {
         );
         let laptop_status = RefCell::new(sync::Status::default());
         let laptop_now = |check: &dyn Fn(&sync::Status) -> bool| {
-            if let Some(status) = laptop_sync.status() {
+            if let Some(status) = laptop_statuses.try_iter().last() {
                 *laptop_status.borrow_mut() = status;
             }
             check(&laptop_status.borrow())
