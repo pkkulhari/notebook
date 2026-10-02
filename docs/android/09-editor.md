@@ -74,7 +74,7 @@ Every span class implements a marker interface, `MdSpan`, so clearing styles rem
 
 ## List continuation
 
-- In `afterTextChanged`, if the change was a single inserted `\n` typed by the user and the cursor isn't in a code block (`document.inCodeBlock`), take the line before the newline and call `list_enter(line)`:
+- In `afterTextChanged`, if the change was a single inserted `\n` typed by the user and the cursor isn't in a code block (`core.lineInCodeBlock`, from the draft's current text), take the line before the newline and call `list_enter(line)`:
   - `Continue { marker, next }`: if the cursor was past `marker`, insert `next` without its leading `\n` at the cursor.
   - `End`: delete the empty item's marker along with the newline just typed.
 - Make these edits from a `post {}` rather than inside the watcher callback. They go through the watcher like typing, so they are saved and undone like typing.

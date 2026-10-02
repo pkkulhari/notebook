@@ -56,12 +56,6 @@ impl Document {
                     .any(|scheme| url.starts_with(scheme))
             })
     }
-
-    pub fn in_code_block(&self, position: i32) -> bool {
-        self.spans
-            .iter()
-            .any(|span| span.style == "code-block" && span.range.contains(&position))
-    }
 }
 
 pub fn parse(source: &str, units: Units) -> Document {
@@ -273,6 +267,21 @@ pub fn list_enter(line: &str) -> Option<ListEnter> {
         marker: line[..marker].chars().count(),
         next,
     })
+}
+
+/// Whether the last line of `source` is in a code block, where Enter doesn't
+/// continue a list. Only what comes before a line decides that, so `source`
+/// can end with the line, and a parse of it is never stale.
+pub fn ends_in_code_block(source: &str) -> bool {
+    let line_start = source.rfind('\n').map_or(0, |i| i + 1);
+    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    Parser::new_ext(source, options)
+        .into_offset_iter()
+        .any(|(event, range)| {
+            matches!(event, Event::Start(Tag::CodeBlock(_)))
+                && range.start < source.len()
+                && range.end > line_start
+        })
 }
 
 pub fn summary(body: &str) -> (String, String) {
@@ -497,6 +506,16 @@ mod tests {
         let doc = parse(source, Units::Chars);
         assert!(doc.hidden.is_empty());
         assert!(doc.links.is_empty());
+    }
+
+    #[test]
+    fn only_lines_inside_code_blocks_end_in_one() {
+        assert!(ends_in_code_block("```\n- code"));
+        assert!(ends_in_code_block("Intro\n\n~~~\n- [ ] code"));
+        assert!(ends_in_code_block("Intro\n\n    - indented code"));
+        assert!(!ends_in_code_block("```\ncode\n```\n- item"));
+        assert!(!ends_in_code_block("- item"));
+        assert!(!ends_in_code_block("Some `code` and\n- item"));
     }
 
     #[test]

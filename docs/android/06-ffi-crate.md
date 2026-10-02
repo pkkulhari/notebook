@@ -144,7 +144,8 @@ A thread named `notebook-events`, owned by `Core`, blocks on the storage `Receiv
 - `list_markers() -> Vec<TextRange>`
 - `hidden_outside(start: i32, end: i32) -> Vec<TextRange>`, called on every selection change without copying the whole document across
 - `link_at(position: i32) -> Option<String>`
-- `in_code_block(position: i32) -> bool`, used by list continuation
+
+List continuation asks `Core::line_in_code_block(id, at)` instead, which parses the draft's text up to that line, so it's never stale.
 
 ## Android context for DNS
 

@@ -23,6 +23,9 @@ class EditorController(private val store: Store, private val text: NoteEditText)
 
     /** Set while the text changes from the draft, so it isn't copied back. */
     private var fromDraft = false
+
+    /** Where a `\n` was just typed, until `afterTextChanged` continues the list. */
+    private var newline = -1
     private val handler = Handler(Looper.getMainLooper())
     private val tick = Runnable { schedule(store.core.tick()) }
 
@@ -69,31 +72,33 @@ class EditorController(private val store: Store, private val text: NoteEditText)
         }
         styler.changed(start)
         schedule(store.core.tick())
-        if (before == 0 && count == 1 && s[start] == '\n') {
-            // After the watcher returns, so the edit goes through it like typing.
-            handler.post { continueList(id, start) }
-        }
+        if (before == 0 && count == 1 && s[start] == '\n') newline = start
     }
 
-    override fun afterTextChanged(s: Editable) {}
+    override fun afterTextChanged(s: Editable) {
+        val at = newline
+        newline = -1
+        if (at >= 0) continueList(s, at)
+    }
 
     /**
      * Enter at the end of a list item starts the next one; on an empty item
-     * it ends the list instead. `newline` is where the typed `\n` is.
+     * it ends the list instead. `newline` is where the typed `\n` is. This
+     * runs within the keyboard's edit, and the change goes through the
+     * watcher like typing.
      */
-    private fun continueList(id: String, newline: Int) {
-        val editable = text.text
-        if (id != this.id || newline >= editable.length || editable[newline] != '\n') return
-        if (styler.inCodeBlock(newline)) return
-        val lineStart = lineStart(editable, newline)
-        when (val enter = listEnter(editable.substring(lineStart, newline))) {
+    private fun continueList(s: Editable, newline: Int) {
+        val id = id ?: return
+        val lineStart = lineStart(s, newline)
+        val enter = listEnter(TextUtils.substring(s, lineStart, newline)) ?: return
+        if (store.core.lineInCodeBlock(id, newline)) return
+        when (enter) {
             is ListEnter.Continue -> if (newline - lineStart >= enter.marker) {
                 val next = enter.next.removePrefix("\n")
-                editable.insert(newline + 1, next)
+                s.insert(newline + 1, next)
                 text.setSelection(newline + 1 + next.length)
             }
-            is ListEnter.End -> editable.delete(lineStart, newline + 1)
-            null -> {}
+            is ListEnter.End -> s.delete(lineStart, newline + 1)
         }
     }
 

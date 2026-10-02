@@ -412,9 +412,6 @@ class MarkdownStyler(private val text: NoteEditText) {
         onLink?.invoke(url)
     }
 
-    /** Whether `position` is in a code block, by the newest parse. */
-    fun inCodeBlock(position: Int) = document?.inCodeBlock(position) ?: false
-
     companion object {
         const val PARSE_DELAY_MS = 80L
 

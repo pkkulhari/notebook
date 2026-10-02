@@ -106,32 +106,38 @@ class EditorTest {
 
     @Test
     fun enterContinuesAndEndsLists() {
+        // Within the keyboard's own edit: the result is there when it returns.
         onMain { input.commitText("- [ ] item", 1) }
         onMain { input.commitText("\n", 1) }
-        waitUntil("the next item") { text.text.toString() == "- [ ] item\n- [ ] " }
+        assertEquals("- [ ] item\n- [ ] " to "- [ ] item\n- [ ] ".length, onMain { text.text.toString() to text.selectionStart })
         onMain { input.commitText("\n", 1) }
-        waitUntil("the list to end") { text.text.toString() == "- [ ] item\n" }
+        assertEquals("- [ ] item\n", content())
         assertInStep()
         onMain {
             input.commitText("- one", 1)
             text.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
             text.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
         }
-        waitUntil("one continuation") { text.text.toString() == "- [ ] item\n- one\n- " }
+        assertEquals("- [ ] item\n- one\n- ", content())
         assertInStep()
     }
 
     @Test
     fun listsDoNotContinueInCodeBlocks() {
-        onMain { input.commitText("```\n- code\n```", 1) }
-        // Let the parse finish, so the editor knows where the code block is.
-        Thread.sleep(300)
         onMain {
+            input.commitText("```\n- code\n```", 1)
             text.setSelection("```\n- code".length)
             input.commitText("\n", 1)
         }
-        Thread.sleep(300)
         assertEquals("```\n- code\n\n```", content())
+        // A fence typed just now counts, before any parse.
+        onMain {
+            text.setSelection(text.length())
+            input.commitText("\n\n~~~\n- also code", 1)
+            input.commitText("\n", 1)
+        }
+        assertEquals("```\n- code\n\n```\n\n~~~\n- also code\n", content())
+        assertInStep()
     }
 
     @Test

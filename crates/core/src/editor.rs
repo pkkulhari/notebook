@@ -141,6 +141,12 @@ impl Draft {
         crdt::text(&self.doc).to_string()
     }
 
+    /// The text before `at`, which is in the draft's units.
+    pub fn text_before(&self, at: usize) -> Result<String, OutOfSync> {
+        let end = self.char_position(at)?;
+        crdt::text(&self.doc).slice(0, end).map_err(|_| OutOfSync)
+    }
+
     /// Whether storage has created the note. A new note's draft exists first.
     pub fn is_created(&self) -> bool {
         self.created

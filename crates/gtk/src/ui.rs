@@ -1324,9 +1324,6 @@ impl Ui {
             return false;
         }
         let mut cursor = buffer.iter_at_mark(&buffer.get_insert());
-        if self.state.borrow().document.in_code_block(cursor.offset()) {
-            return false;
-        }
         let mut start = cursor;
         start.set_line_offset(0);
         let mut end = cursor;
@@ -1334,7 +1331,13 @@ impl Ui {
             end.forward_to_line_end();
         }
         let line = buffer.text(&start, &end, true);
-        match markdown::list_enter(&line) {
+        let enter = markdown::list_enter(&line);
+        if enter.is_some()
+            && markdown::ends_in_code_block(&buffer.text(&buffer.start_iter(), &end, true))
+        {
+            return false;
+        }
+        match enter {
             Some(markdown::ListEnter::Continue { marker, next })
                 if cursor.line_offset() >= marker as i32 =>
             {

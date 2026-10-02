@@ -220,6 +220,21 @@ fn positions_outside_the_draft_are_out_of_sync() {
 }
 
 #[test]
+fn lines_in_code_blocks_are_found_in_the_current_text() {
+    let phone = Phone::start();
+    let id = phone.ready();
+    let text = "🌿\n```\n- code";
+    phone.core.replace(id.clone(), 0, 0, text.into()).unwrap();
+    let end = text.encode_utf16().count() as i32;
+    assert!(phone.core.line_in_code_block(id.clone(), end));
+    // The first line, before the fence, isn't in it.
+    assert!(!phone.core.line_in_code_block(id.clone(), 2));
+    // A position inside the emoji's surrogate pair, or without a draft.
+    assert!(!phone.core.line_in_code_block(id, 1));
+    assert!(!phone.core.line_in_code_block("no-such-note".into(), 0));
+}
+
+#[test]
 fn flushed_follows_every_earlier_save() {
     let phone = Phone::start();
     let id = phone.ready();
@@ -332,9 +347,6 @@ fn markdown_ranges_are_utf16_and_links_are_filtered() {
     );
     let file = site + "[site](https://example.org) ".len() as i32;
     assert_eq!(document.link_at(file + 1), None);
-    let code = text.encode_utf16().count() as i32 - "code\n```".len() as i32;
-    assert!(document.in_code_block(code));
-    assert!(!document.in_code_block(site));
     assert_eq!(
         list_enter("- [ ] 🌿".into()),
         Some(ListEnter::Continue {

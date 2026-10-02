@@ -150,10 +150,6 @@ impl MarkdownDocument {
     pub fn link_at(&self, position: i32) -> Option<String> {
         self.document.link_at(position).map(Into::into)
     }
-
-    pub fn in_code_block(&self, position: i32) -> bool {
-        self.document.in_code_block(position)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]

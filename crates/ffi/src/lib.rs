@@ -201,6 +201,16 @@ impl Core {
         Ok(draft.replace(unit(at)?, unit(len)?, &text)?)
     }
 
+    /// Whether the draft's line that ends at `at` is in a code block, by its
+    /// current text. Enter there shouldn't continue a list.
+    pub fn line_in_code_block(&self, id: String, at: i32) -> bool {
+        let before = self
+            .drafts()
+            .get(&id)
+            .and_then(|d| d.text_before(unit(at).ok()?).ok());
+        before.is_some_and(|text| notebook_core::markdown::ends_in_code_block(&text))
+    }
+
     /// `None` if there's nothing to undo.
     pub fn undo(&self, id: String) -> Option<Applied> {
         self.drafts().get_mut(&id)?.undo().map(Into::into)
