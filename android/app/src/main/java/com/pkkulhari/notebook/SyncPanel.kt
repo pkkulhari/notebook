@@ -116,7 +116,7 @@ class SyncPanel(
             val row = LinearLayout(context).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 8, 0, 8)
+                setPadding(0, context.dp(8), 0, context.dp(8))
             }
             row.addView(LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
