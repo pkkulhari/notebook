@@ -44,6 +44,9 @@
     <string name="connected">Connected</string>
     <string name="not_connected">Not connected</string>
     <string name="last_synced">Not connected. Last synced: %1$s</string>
+    <string name="now">Now</string>
+    <string name="today">Today</string>
+    <string name="yesterday">Yesterday</string>
     <string name="remove">Remove</string>
     <string name="pair_a_device">Pair a device</string>
     <string name="pairing_intro">Turn on sync on both devices. They must be on the same network to pair.</string>

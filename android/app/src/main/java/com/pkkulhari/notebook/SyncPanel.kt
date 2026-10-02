@@ -110,7 +110,7 @@ class SyncPanel(
         for (device in status.devices) {
             val state = when {
                 device.connected -> context.getString(R.string.connected)
-                device.lastSynced != null -> context.getString(R.string.last_synced, noteDate(device.lastSynced!!))
+                device.lastSynced != null -> context.getString(R.string.last_synced, noteDate(context, device.lastSynced!!))
                 else -> context.getString(R.string.not_connected)
             }
             val row = LinearLayout(context).apply {

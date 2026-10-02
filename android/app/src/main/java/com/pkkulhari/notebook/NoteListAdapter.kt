@@ -31,7 +31,7 @@ class NoteListAdapter(private val inflater: LayoutInflater) : BaseAdapter() {
         val row = view.tag as Row
         val note = notes[position]
         row.label.text = note.label
-        row.date.text = noteDate(note.updatedAt)
+        row.date.text = noteDate(inflater.context, note.updatedAt)
         row.preview.text = note.preview
         row.preview.visibility = if (note.preview.isEmpty()) View.GONE else View.VISIBLE
         return view
