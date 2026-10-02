@@ -22,6 +22,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Notebook">
 
+        <!-- Lets `adb shell` tools such as simpleperf profile release builds. -->
+        <profileable android:shell="true" />
+
         <!-- Rotation and keyboard changes keep the editor's text, spans,
              scroll and input state instead of rebuilding the activity. -->
         <activity

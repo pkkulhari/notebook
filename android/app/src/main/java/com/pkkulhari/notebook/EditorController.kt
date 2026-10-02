@@ -34,25 +34,17 @@ class EditorController(private val store: Store, private val text: NoteEditText)
         text.addTextChangedListener(this)
         text.onSelection = { if (id != null) styler.selectionChanged() }
         text.onUndo = { redo -> if (redo) redo() else undo() }
-        styler.onRestyle = ::restyle
     }
 
     fun open(id: String, body: String, cursor: Int) {
         val at = cursor.coerceIn(0, body.length)
         this.id = null
-        text.setText(styler.style(body, at))
+        // Styled first, so the text is laid out once, with its styling.
+        styler.style(body, at)
+        text.setText(body)
+        styler.attach()
         this.id = id
         text.setSelection(at)
-    }
-
-    /** Sets the same text again with all its styling, keeping the selection. */
-    private fun restyle() {
-        val id = id ?: return
-        val (start, end) = text.selectionStart to text.selectionEnd
-        this.id = null
-        text.setText(styler.style(text.text.toString(), start))
-        this.id = id
-        text.setSelection(start.coerceIn(0, text.length()), end.coerceIn(0, text.length()))
     }
 
     fun close() {

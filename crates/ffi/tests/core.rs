@@ -339,11 +339,19 @@ fn hidden_ranges_never_cross_a_line_break() {
     let units: Vec<u16> = text.encode_utf16().collect();
     let end = units.len() as i32;
     let hidden: Vec<String> = document
-        .hidden_outside(end, end)
+        .hidden_outside(end, end, 0, end)
         .iter()
         .map(|r| String::from_utf16(&units[r.start as usize..r.end as usize]).unwrap())
         .collect();
     assert_eq!(hidden, ["===", "**", "**"]);
+    // Only syntax that reaches into the window comes back.
+    let bold = "Title\n===\n\n".encode_utf16().count() as i32;
+    let starts: Vec<i32> = document
+        .hidden_outside(end, end, bold, bold + 1)
+        .iter()
+        .map(|r| r.start)
+        .collect();
+    assert_eq!(starts, [bold]);
     // The cursor in "Next" makes only that paragraph active.
     let next = text.encode_utf16().count() as i32 - 4;
     assert_eq!(

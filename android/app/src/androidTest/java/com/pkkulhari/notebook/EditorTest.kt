@@ -3,6 +3,7 @@ package com.pkkulhari.notebook
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.SystemClock
+import android.text.Spanned
 import android.text.style.StyleSpan
 import android.util.Log
 import android.view.KeyEvent
@@ -58,11 +59,14 @@ class EditorTest {
     /** The text widget and the core's draft hold the same text. */
     private fun assertInStep() = assertEquals(content(), onMain { store.core.draftText(id) })
 
+    /** The text as the widget lays it out: with the styling spans. Call on the main thread. */
+    private fun shown(): Spanned = text.layout.text as Spanned
+
     /** Where each hidden piece of syntax starts. Call on the main thread. */
     private fun hiddenStarts(): List<Int> {
-        val editable = text.text
-        return editable.getSpans(0, editable.length, MarkdownStyler.HiddenSpan::class.java)
-            .map(editable::getSpanStart)
+        val shown = shown()
+        return shown.getSpans(0, shown.length, MarkdownStyler.HiddenSpan::class.java)
+            .map(shown::getSpanStart)
             .sorted()
     }
 
@@ -148,7 +152,7 @@ class EditorTest {
     fun copyingKeepsMarkdownAndPastingDropsFormatting() {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         onMain { input.commitText("Plant **tomatoes**", 1) }
-        waitUntil("styling") { hiddenStarts().isEmpty() && text.text.getSpans(0, text.length(), StyleSpan::class.java).isNotEmpty() }
+        waitUntil("styling") { hiddenStarts().isEmpty() && shown().getSpans(0, text.length(), StyleSpan::class.java).isNotEmpty() }
         onMain {
             text.selectAll()
             text.onTextContextMenuItem(android.R.id.copy)
@@ -163,11 +167,15 @@ class EditorTest {
         assertEquals("Plant **tomatoes**bold", content())
         assertInStep()
         Thread.sleep(300)
-        val pasted = onMain { text.text.getSpans(text.length() - 3, text.length(), StyleSpan::class.java).toList() }
+        val pasted = onMain { shown().getSpans(text.length() - 3, text.length(), StyleSpan::class.java).toList() }
         assertTrue("pasted text kept foreign formatting: $pasted", pasted.isEmpty())
     }
 
-    /** Logs timings for a 50,000-character note; the bounds only catch something badly wrong. */
+    /**
+     * Logs timings for a 50,000-character note; the bounds only catch something
+     * badly wrong. Typing at the top is the worst case: every styled span after
+     * the cursor costs layout work on each keystroke.
+     */
     @Test
     fun aLongNoteStaysResponsive() {
         val line = "- [ ] A **task** with _emphasis_ and `code` 🌿\n"
@@ -177,6 +185,10 @@ class EditorTest {
         val inserted = SystemClock.uptimeMillis()
         waitUntil("styling", timeoutMs = 30_000) { hiddenStarts().isNotEmpty() }
         val styled = SystemClock.uptimeMillis()
+        // Typing leaves the styling spans alone: they aren't on the edited text.
+        assertTrue(onMain { text.text.getSpans(0, text.length(), MarkdownStyler.HiddenSpan::class.java).isEmpty() })
+
+        onMain { text.setSelection(0) }
         val keystrokes = (1..20).map {
             onMain {
                 val start = SystemClock.uptimeMillis()
@@ -184,8 +196,14 @@ class EditorTest {
                 SystemClock.uptimeMillis() - start
             }
         }
-        Log.i("NotebookTiming", "50k note: insert ${inserted - loaded} ms, styled after ${styled - inserted} ms, keystrokes max ${keystrokes.max()} ms, median ${keystrokes.sorted()[10]} ms")
+        Log.i("NotebookTiming", "50k note: insert ${inserted - loaded} ms, styled after ${styled - inserted} ms, keystrokes at the top max ${keystrokes.max()} ms, median ${keystrokes.sorted()[10]} ms")
         assertInStep()
         assertTrue("a keystroke took ${keystrokes.max()} ms", keystrokes.max() < 100)
+
+        // After a pause the parse catches up: the first line, typed over, is
+        // no longer a list item, so it loses its hanging indent.
+        waitUntil("styling after typing") {
+            shown().getSpans(0, 30, android.text.style.LeadingMarginSpan::class.java).isEmpty()
+        }
     }
 }
