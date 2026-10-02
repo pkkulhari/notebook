@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/problem"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?android:attr/colorBackgroundFloating"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="20dp"
+        android:paddingEnd="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/problem_text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:paddingVertical="12dp"
+            android:textAppearance="@android:style/TextAppearance.DeviceDefault.Small" />
+
+        <Button
+            android:id="@+id/problem_action"
+            style="@android:style/Widget.DeviceDefault.Button.Borderless.Colored"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <LinearLayout
+            android:id="@+id/list_screen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/list_title"
+                android:layout_width="wrap_content"
+                android:layout_height="56dp"
+                android:layout_marginStart="12dp"
+                android:background="?android:attr/selectableItemBackground"
+                android:contentDescription="@string/choose_notebook"
+                android:drawableEnd="@drawable/ic_drop_down"
+                android:drawablePadding="4dp"
+                android:ellipsize="end"
+                android:gravity="center_vertical"
+                android:maxLines="1"
+                android:paddingHorizontal="8dp"
+                android:textAppearance="@android:style/TextAppearance.DeviceDefault.Large"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/search"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="16dp"
+                android:autofillHints=""
+                android:hint="@string/search_notes"
+                android:imeOptions="actionSearch"
+                android:inputType="text"
+                android:maxLines="1" />
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
+
+                <ListView
+                    android:id="@+id/notes"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:clipToPadding="false"
+                    android:divider="@null"
+                    android:paddingBottom="88dp" />
+
+                <TextView
+                    android:id="@+id/list_empty"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center"
+                    android:text="@string/no_notes"
+                    android:textAppearance="@android:style/TextAppearance.DeviceDefault.Medium"
+                    android:visibility="gone" />
+
+                <ImageButton
+                    android:id="@+id/new_note"
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    android:layout_gravity="bottom|end"
+                    android:layout_margin="20dp"
+                    android:background="@drawable/fab"
+                    android:contentDescription="@string/new_note"
+                    android:elevation="4dp"
+                    android:src="@drawable/ic_add"
+                    android:tint="?android:attr/colorBackground" />
+            </FrameLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/editor_screen"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="4dp">
+
+                <ImageButton
+                    android:id="@+id/back"
+                    style="@style/ToolbarButton"
+                    android:contentDescription="@string/back"
+                    android:src="@drawable/ic_back" />
+
+                <TextView
+                    android:id="@+id/location"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:maxWidth="180dp"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:contentDescription="@string/move_note"
+                    android:drawableEnd="@drawable/ic_drop_down"
+                    android:ellipsize="end"
+                    android:gravity="center_vertical"
+                    android:maxLines="1"
+                    android:paddingHorizontal="8dp"
+                    android:textAppearance="@android:style/TextAppearance.DeviceDefault.Small" />
+
+                <Space
+                    android:layout_width="0dp"
+                    android:layout_height="0dp"
+                    android:layout_weight="1" />
+
+                <ImageButton
+                    android:id="@+id/undo"
+                    style="@style/ToolbarButton"
+                    android:contentDescription="@string/undo"
+                    android:src="@drawable/ic_undo" />
+
+                <ImageButton
+                    android:id="@+id/redo"
+                    style="@style/ToolbarButton"
+                    android:contentDescription="@string/redo"
+                    android:src="@drawable/ic_redo" />
+
+                <ImageButton
+                    android:id="@+id/trash"
+                    style="@style/ToolbarButton"
+                    android:contentDescription="@string/move_to_trash"
+                    android:src="@drawable/ic_trash" />
+            </LinearLayout>
+
+            <EditText
+                android:id="@+id/text"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="@null"
+                android:gravity="top|start"
+                android:hint="@string/start_writing"
+                android:importantForAutofill="no"
+                android:inputType="textMultiLine|textCapSentences"
+                android:lineSpacingMultiplier="1.25"
+                android:paddingHorizontal="20dp"
+                android:paddingTop="8dp"
+                android:paddingBottom="24dp"
+                android:textSize="17sp" />
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>

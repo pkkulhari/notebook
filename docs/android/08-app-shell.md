@@ -1,6 +1,6 @@
 # 8. App shell
 
-**Status:** Not started
+**Status:** Done (tested on an x86_64 emulator; the arm64 phone wasn't connected)
 **Needs:** step 7
 
 ## Goal
@@ -106,4 +106,13 @@ Step 9 builds on this.
 
 ## Notes
 
-_Anything surprising goes here._
+- **Running instrumented tests uninstalls the app afterwards**, notes included. Run them on an emulator, or on a phone with no notes you care about. The tests themselves use `TestRunner`, which starts `TestApp`, an application that keeps its database in a fresh cache directory.
+- **No AndroidX at all.** The note list is a framework `ListView` with a small `BaseAdapter`, not RecyclerView: the list is one simple row type, and that keeps JNA as the only runtime dependency.
+- **Trashing the open note returns to the list**, rather than opening its neighbour as the desktop does. The same happens when another device trashes it. On a phone, an unexpected different note in the editor is more confusing than the list.
+- **Startup:** `Ready` opens the editor when the last session ended there (`selected_note`). It also opens when the starting note is empty, so a first start goes straight to writing, as on the desktop. Otherwise the list shows.
+- **Dark mode recreates the activity.** `uiMode` isn't in `configChanges`, because the platform theme's colours only refresh on recreation. Text, cursor and undo history survive, because `Store` belongs to the `Application` and the history lives in the core. Rotation and keyboard changes don't recreate it. `MainActivityTest` covers both.
+- **The list refreshes on `Saved` only while it's showing.** Otherwise it's marked stale and refreshes when the editor closes, so typing never triggers list queries.
+- **Notebook name errors** such as "A notebook with that name already exists" show in the problem bar, since the name dialog has already closed.
+- **Shortcuts:** with a hardware keyboard, Ctrl+Z, Ctrl+Shift+Z and Ctrl+Y undo and redo through the core, and Ctrl+N starts a note.
+- **Tests:** `StoreTest` covers doc tests 1–4 through `Store` and a real `EditText`, and `MainActivityTest` covers test 5. Their cores stay open until the process ends, because an editor's scheduled save can still run after a test finishes.
+- **Manual check on the emulator:** typed, pressed Home, force-stopped, and relaunched. The text was there, back in the editor. The debug cold start took 454 ms; step 11 measures release builds.

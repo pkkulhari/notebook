@@ -23,7 +23,8 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Runs tests against a throwaway database, never the real notes.
+        testInstrumentationRunner = "com.pkkulhari.notebook.TestRunner"
     }
 
     buildTypes {
