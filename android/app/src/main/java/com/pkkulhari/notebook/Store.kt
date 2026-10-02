@@ -13,6 +13,7 @@ import com.pkkulhari.notebook.core.Mutation
 import com.pkkulhari.notebook.core.NoteInfo
 import com.pkkulhari.notebook.core.NoteSummary
 import com.pkkulhari.notebook.core.Notebook
+import com.pkkulhari.notebook.core.SyncControl
 import com.pkkulhari.notebook.core.SyncStatus
 import java.io.File
 import java.util.UUID
@@ -85,6 +86,11 @@ class Store(
     /** Where the cursor was when the app last paused, in UTF-16 units. */
     var cursor = 0
 
+    private val network = NetworkWatch(context) { core.sync(SyncControl.NetworkChanged) }
+
+    /** Whether an activity is showing; sync runs only then. */
+    private var visible = false
+
     /** Every note whose draft is open in the core. */
     private val drafts = mutableMapOf<String, NoteInfo>()
     private var listGeneration = 0L
@@ -122,6 +128,7 @@ class Store(
     override fun onSyncStatus(status: SyncStatus) {
         main.post {
             syncStatus = status
+            if (visible) network.multicast(status.enabled)
             listener?.syncChanged()
         }
     }
@@ -344,6 +351,26 @@ class Store(
     }
 
     fun dismissProblem() = setProblem(null)
+
+    /**
+     * Sync runs while the app is visible: peer-to-peer sync needs both apps
+     * open anyway, and Android restricts networking in the background. A
+     * suspended device catches up when it resumes.
+     */
+    fun foreground(visible: Boolean) {
+        if (visible == this.visible) return
+        this.visible = visible
+        if (visible) {
+            network.start()
+            network.multicast(syncStatus?.enabled == true)
+            core.sync(SyncControl.Suspend(false))
+        } else {
+            core.flush()
+            core.sync(SyncControl.Suspend(true))
+            network.stop()
+            network.multicast(false)
+        }
+    }
 
     /** Sends every unsaved edit, and remembers where the app was. */
     fun pause() {

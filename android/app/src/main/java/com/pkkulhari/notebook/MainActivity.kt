@@ -3,7 +3,10 @@ package com.pkkulhari.notebook
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -43,6 +46,9 @@ class MainActivity : Activity(), Store.Listener {
     private lateinit var problem: View
     private lateinit var problemText: TextView
     private lateinit var problemAction: Button
+    private lateinit var syncScreen: View
+    private lateinit var syncButton: ImageButton
+    private lateinit var sync: SyncPanel
 
     private lateinit var editor: EditorController
     private lateinit var adapter: NoteListAdapter
@@ -50,7 +56,7 @@ class MainActivity : Activity(), Store.Listener {
 
     private val handler = Handler(Looper.getMainLooper())
     private val runSearch = Runnable { store.search(search.text.toString()) }
-    private val back = OnBackInvokedCallback { store.closeNote() }
+    private val back = OnBackInvokedCallback { goBack() }
     private var backRegistered = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,6 +77,11 @@ class MainActivity : Activity(), Store.Listener {
         problem = findViewById(R.id.problem)
         problemText = findViewById(R.id.problem_text)
         problemAction = findViewById(R.id.problem_action)
+        syncScreen = findViewById(R.id.sync_screen)
+        syncButton = findViewById(R.id.sync_button)
+        sync = SyncPanel(syncScreen, store, ::allowLocalNetwork)
+        syncButton.setOnClickListener { showSync(true) }
+        findViewById<View>(R.id.sync_back).setOnClickListener { showSync(false) }
 
         editor = EditorController(store, text)
         adapter = NoteListAdapter(layoutInflater)
@@ -113,6 +124,17 @@ class MainActivity : Activity(), Store.Listener {
             closed()
         }
         problemChanged()
+        syncChanged()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        store.foreground(true)
+    }
+
+    override fun onStop() {
+        store.foreground(false)
+        super.onStop()
     }
 
     override fun onDestroy() {
@@ -152,10 +174,8 @@ class MainActivity : Activity(), Store.Listener {
         listScreen.visibility = View.GONE
         editorScreen.visibility = View.VISIBLE
         activeChanged()
-        if (!backRegistered) {
-            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, back)
-            backRegistered = true
-        }
+        syncScreen.visibility = View.GONE
+        updateBack()
         if (focus && !note.deleted) {
             this.text.requestFocus()
             getSystemService(InputMethodManager::class.java).showSoftInput(this.text, 0)
@@ -168,11 +188,46 @@ class MainActivity : Activity(), Store.Listener {
         text.clearFocus()
         editorScreen.visibility = View.GONE
         listScreen.visibility = View.VISIBLE
-        if (backRegistered) {
-            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(back)
-            backRegistered = false
-        }
+        updateBack()
         listChanged()
+    }
+
+    /** Back closes the sync screen or the editor; from the list it leaves the app. */
+    private fun goBack() {
+        if (syncScreen.visibility == View.VISIBLE) showSync(false) else store.closeNote()
+    }
+
+    private fun updateBack() {
+        val wanted = syncScreen.visibility == View.VISIBLE || editorScreen.visibility == View.VISIBLE
+        if (wanted && !backRegistered) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, back)
+        } else if (!wanted && backRegistered) {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(back)
+        }
+        backRegistered = wanted
+    }
+
+    private fun showSync(show: Boolean) {
+        syncScreen.visibility = if (show) View.VISIBLE else View.GONE
+        listScreen.visibility = if (show || editorScreen.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        if (show) sync.update() else getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(syncScreen.windowToken, 0)
+        updateBack()
+    }
+
+    /**
+     * Android 17 asks before an app reaches devices on the local network.
+     * Asked when sync is turned on or pairing starts, never at launch.
+     */
+    private fun allowLocalNetwork() {
+        if (Build.VERSION.SDK_INT < 37 || checkSelfPermission(LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) return
+        requestPermissions(arrayOf(LOCAL_NETWORK), LOCAL_NETWORK_REQUEST)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == LOCAL_NETWORK_REQUEST) {
+            sync.localNetworkDenied = grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED
+        }
     }
 
     override fun activeChanged() {
@@ -201,7 +256,23 @@ class MainActivity : Activity(), Store.Listener {
         problemAction.setText(if (current?.retryable == true) R.string.retry else R.string.dismiss)
     }
 
-    override fun syncChanged() {}
+    override fun syncChanged() {
+        val status = store.syncStatus ?: return
+        if (syncScreen.visibility == View.VISIBLE) sync.update()
+        val connected = status.devices.filter { it.connected }.map { it.name }
+        syncButton.contentDescription = when {
+            status.problem != null -> status.problem
+            !status.enabled -> getString(R.string.sync_off)
+            connected.isEmpty() -> getString(R.string.sync_idle)
+            connected.size == 1 -> getString(R.string.syncing_with, connected[0])
+            else -> getString(R.string.syncing_with_many, connected.size)
+        }
+        syncButton.tooltipText = syncButton.contentDescription
+        // Lit while syncing with at least one device, like the desktop's button.
+        syncButton.imageTintList = ColorStateList.valueOf(
+            getColor(if (connected.isNotEmpty()) android.R.color.system_accent1_500 else android.R.color.system_neutral1_500),
+        )
+    }
 
     /** Links are opened deliberately, from the top bar; a tap only places the cursor. */
     private fun open(url: String) {
@@ -238,6 +309,8 @@ class MainActivity : Activity(), Store.Listener {
 
     companion object {
         private const val SEARCH_DELAY_MS = 150L
+        private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
+        private const val LOCAL_NETWORK_REQUEST = 1
         private val WHITESPACE = Regex("\\s+")
     }
 }

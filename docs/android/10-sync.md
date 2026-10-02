@@ -1,6 +1,6 @@
 # 10. Sync on Android
 
-**Status:** Not started
+**Status:** Done, except the manual interop tests on a real phone
 **Needs:** step 8 (and step 1's findings, step 5's `Suspend` and `NetworkChanged`)
 
 ## Goal
@@ -56,7 +56,7 @@ Sync runs while the app is visible. Peer-to-peer sync needs both apps open anywa
 - **mDNS cost:** swarm-discovery sends a query about every 0.7 s for as long as the endpoint runs, with no back-off (75–83 a minute in the spike). Suspending in `onStop` already limits that to while the app is visible.
   - Worth considering: pause discovery while every paired device is connected.
   - Also propose a cadence option upstream, since `iroh-mdns-address-lookup` doesn't expose swarm-discovery's `with_cadence`.
-- **Reopening the app:** until step 5's stale-session fix lands, a device the phone synced with before the app restarted can take up to 30 s to reconnect.
+- **Reopening the app:** step 5's stale-session fix means a device the phone synced with before the app restarted accepts its new connection at once.
 - **Pairing across backgrounding:** suspending cancels a pairing in progress, just as stopping sync does on the desktop. When the app comes back, the pairing section shows its idle state again.
 
 ## Files and backup
@@ -91,4 +91,18 @@ Record the results in Notes, with the phone model and Android version.
 
 ## Notes
 
-_Anything surprising goes here._
+- **The sync screen is a third screen in `MainActivity`**, not a separate activity. Opening it then doesn't stop the activity, which would suspend sync just when pairing needs it.
+  - `SyncPanel` holds the widgets and uses a `quiet` flag, as the desktop does. A name or relay address being typed isn't overwritten by a status update.
+  - The list header's sync button turns accent-coloured while any device is connected, and its content description and tooltip use the desktop's wording.
+- **Lifecycle:** `MainActivity.onStart` and `onStop` call `Store.foreground`, which owns a `NetworkWatch` (the multicast lock, plus the default-network callback debounced by 500 ms). The lock follows the sync switch while the app is visible.
+  - Checked on the emulator: in the background the app holds no sockets and no lock, and `Status.suspended` is set.
+  - Back in the foreground it rebinds on a new UDP port and takes the lock again.
+- **The core isn't suspended when the process starts.** A process normally starts because an activity is about to, and suspending first would bind, unbind and bind again. A process started in the background for another reason syncs until it ends.
+- **Local network permission:** `ACCESS_LOCAL_NETWORK` is declared and requested on API 37+ when sync is turned on or pairing starts. If refused, the problem line says sync works only through a relay. This hasn't been tested on Android 17.
+- **Sync works end to end on the emulator, through the real app.** The emulator is behind NAT, so mDNS can't reach it. The test used the new `crates/core/examples/sync_peer.rs`, a headless device:
+  1. `adb shell run-as com.pkkulhari.notebook cat no_backup/sync.json` gives the app's secret key, and `sync_peer --key-of KEY` turns it into the endpoint ID.
+  2. The app's iroh UDP port comes from `/proc/net/udp` for its uid, and `adb emu redir add udp:47000:PORT` forwards a host port to it.
+  3. `sync_peer --dir DIR --introduce ID@127.0.0.1:47000 --join CODE --note TEXT` pairs with the code the app shows, and syncs both ways. The peer's note appeared in the app's list, and the app's note reached the peer.
+  4. After the app went to the background and came back, the restarted peer reconnected and synced, with a new forward to the new port.
+- **Tests:** `SyncTest` covers the screen: the switch, renaming, showing and cancelling a code, and suspend and resume.
+- **Still manual, on a real phone:** the interop list above (with the GTK app, Wi-Fi changes, mobile data with a relay, removal, ten minutes in the background), and Android 17.
