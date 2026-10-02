@@ -18,14 +18,10 @@ import com.pkkulhari.notebook.core.Filter
 import com.pkkulhari.notebook.core.Notebook
 
 class NotebookPicker(private val activity: Activity, private val store: Store) {
-    private fun dp(value: Int) = TypedValue.applyDimension(
-        TypedValue.COMPLEX_UNIT_DIP, value.toFloat(), activity.resources.displayMetrics,
-    ).toInt()
-
     fun show() {
         val rows = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(8), 0, dp(8))
+            setPadding(0, activity.dp(8), 0, activity.dp(8))
         }
         val dialog = AlertDialog.Builder(activity)
             .setView(ScrollView(activity).apply { addView(rows) })
@@ -44,8 +40,8 @@ class NotebookPicker(private val activity: Activity, private val store: Store) {
         val row = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            minimumHeight = dp(52)
-            setPadding(dp(24), 0, dp(8), 0)
+            minimumHeight = activity.dp(52)
+            setPadding(activity.dp(24), 0, activity.dp(8), 0)
             isClickable = true
             background = activity.getDrawable(selectableBackground())
             setOnClickListener {
@@ -62,7 +58,7 @@ class NotebookPicker(private val activity: Activity, private val store: Store) {
         row.addView(TextView(activity).apply {
             text = store.count(filter).toString()
             setTextAppearance(android.R.style.TextAppearance_DeviceDefault_Small)
-            setPadding(dp(8), 0, dp(8), 0)
+            setPadding(activity.dp(8), 0, activity.dp(8), 0)
         })
         // Default can't be renamed or deleted; the others get a menu.
         val menu = ImageButton(activity).apply {
@@ -85,7 +81,7 @@ class NotebookPicker(private val activity: Activity, private val store: Store) {
                 }.show()
             }
         }
-        row.addView(menu, LinearLayout.LayoutParams(dp(48), dp(48)))
+        row.addView(menu, LinearLayout.LayoutParams(activity.dp(48), activity.dp(48)))
         return row
     }
 
@@ -98,7 +94,7 @@ class NotebookPicker(private val activity: Activity, private val store: Store) {
             selectAll()
         }
         val frame = FrameLayout(activity).apply {
-            setPadding(dp(24), dp(8), dp(24), 0)
+            setPadding(activity.dp(24), activity.dp(8), activity.dp(24), 0)
             addView(field)
         }
         val dialog = AlertDialog.Builder(activity)

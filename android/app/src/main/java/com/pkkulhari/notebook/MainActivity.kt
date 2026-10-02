@@ -25,6 +25,7 @@ import android.widget.TextView
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
 import com.pkkulhari.notebook.core.Applied
+import com.pkkulhari.notebook.core.Filter
 import com.pkkulhari.notebook.core.NoteInfo
 
 class MainActivity : Activity(), Store.Listener {
@@ -33,14 +34,12 @@ class MainActivity : Activity(), Store.Listener {
     private lateinit var listScreen: View
     private lateinit var listTitle: TextView
     private lateinit var search: EditText
-    private lateinit var notes: ListView
     private lateinit var listEmpty: TextView
     private lateinit var editorScreen: View
     private lateinit var location: TextView
     private lateinit var undo: ImageButton
     private lateinit var redo: ImageButton
     private lateinit var trash: ImageButton
-    private lateinit var openLink: ImageButton
     private lateinit var text: NoteEditText
     private lateinit var problem: View
     private lateinit var problemText: TextView
@@ -64,14 +63,14 @@ class MainActivity : Activity(), Store.Listener {
         listScreen = findViewById(R.id.list_screen)
         listTitle = findViewById(R.id.list_title)
         search = findViewById(R.id.search)
-        notes = findViewById(R.id.notes)
+        val notes = findViewById<ListView>(R.id.notes)
         listEmpty = findViewById(R.id.list_empty)
         editorScreen = findViewById(R.id.editor_screen)
         location = findViewById(R.id.location)
         undo = findViewById(R.id.undo)
         redo = findViewById(R.id.redo)
         trash = findViewById(R.id.trash)
-        openLink = findViewById(R.id.open_link)
+        val openLink = findViewById<ImageButton>(R.id.open_link)
         text = findViewById(R.id.text)
         problem = findViewById(R.id.problem)
         problemText = findViewById(R.id.problem_text)
@@ -138,6 +137,7 @@ class MainActivity : Activity(), Store.Listener {
 
     override fun onDestroy() {
         handler.removeCallbacks(runSearch)
+        editor.close()
         if (store.listener === this) store.listener = null
         super.onDestroy()
     }
@@ -233,7 +233,7 @@ class MainActivity : Activity(), Store.Listener {
 
     override fun activeChanged() {
         val note = store.activeNote ?: return
-        location.text = store.notebooks.find { it.id == note.notebookId }?.name ?: getString(R.string.default_notebook)
+        location.text = store.filterName(Filter.Notebook(note.notebookId))
         location.isEnabled = !note.deleted
         // Trashed notes are read-only until restored.
         val editable = !note.deleted

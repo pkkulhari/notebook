@@ -48,6 +48,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
 
     fun close() {
         id = null
+        handler.removeCallbacks(tick)
         styler.closed()
     }
 
@@ -59,7 +60,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
         try {
             // Keyboards rewrite the word they're composing; the core records
             // only the part that changed.
-            store.core.replace(id, start, before, s.subSequence(start, start + count).toString())
+            store.core.replace(id, start, before, TextUtils.substring(s, start, start + count))
         } catch (error: CoreException) {
             Log.w(TAG, "The editor and the draft disagree; reloading", error)
             this.id = null
@@ -84,7 +85,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
         val editable = text.text
         if (id != this.id || newline >= editable.length || editable[newline] != '\n') return
         if (styler.inCodeBlock(newline)) return
-        val lineStart = if (newline == 0) 0 else TextUtils.lastIndexOf(editable, '\n', newline - 1) + 1
+        val lineStart = lineStart(editable, newline)
         when (val enter = listEnter(editable.substring(lineStart, newline))) {
             is ListEnter.Continue -> if (newline - lineStart >= enter.marker) {
                 val next = enter.next.removePrefix("\n")

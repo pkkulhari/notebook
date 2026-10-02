@@ -1,7 +1,6 @@
 package com.pkkulhari.notebook
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import com.pkkulhari.notebook.core.Core
 import com.pkkulhari.notebook.core.CoreConfig
 import com.pkkulhari.notebook.core.CoreEvent
@@ -40,9 +39,8 @@ class CoreSmokeTest {
 
     @Before
     fun setUp() {
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
         AndroidContext.install(context)
-        dir = File(context.cacheDir, "smoke-${System.nanoTime()}").apply { mkdirs() }
+        dir = temporaryDirectory()
     }
 
     @After
@@ -64,7 +62,7 @@ class CoreSmokeTest {
             core.initialize()
             val ready = first.next<CoreEvent.Ready>()
             assertEquals("", core.openDraft(ready.note, ready.snapshot))
-            core.insert(ready.note.id, 0, text)
+            core.replace(ready.note.id, 0, 0, text)
             core.flush()
             first.next<CoreEvent.Flushed>()
             ready.note.id

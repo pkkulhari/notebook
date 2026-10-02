@@ -42,6 +42,26 @@ impl Document {
             .cloned()
             .collect()
     }
+
+    /// The URL of the link at `position`, if it's one the app may open:
+    /// http, https or mailto.
+    pub fn link_at(&self, position: i32) -> Option<&str> {
+        self.links
+            .iter()
+            .find(|(range, _)| range.contains(&position))
+            .map(|(_, url)| url.as_str())
+            .filter(|url| {
+                ["https://", "http://", "mailto:"]
+                    .iter()
+                    .any(|scheme| url.starts_with(scheme))
+            })
+    }
+
+    pub fn in_code_block(&self, position: i32) -> bool {
+        self.spans
+            .iter()
+            .any(|span| span.style == "code-block" && span.range.contains(&position))
+    }
 }
 
 pub fn parse(source: &str, units: Units) -> Document {

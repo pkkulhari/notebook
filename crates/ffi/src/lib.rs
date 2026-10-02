@@ -10,7 +10,8 @@
 //!    Kotlin imports them on the main thread, so the draft never gets ahead of
 //!    the text widget.
 //! 3. Bookkeeping that doesn't change text happens here as events arrive:
-//!    saves acknowledged, notes created, and failed commands kept for retry.
+//!    saves acknowledged, notes created, moved or trashed, and failed
+//!    commands kept for retry.
 //! 4. Listener callbacks run on Rust threads. Kotlin posts them to the main
 //!    thread before touching the UI or calling back into `Core`.
 uniffi::setup_scaffolding!();
@@ -24,7 +25,7 @@ pub use markdown::*;
 pub use types::*;
 
 use notebook_core::{
-    editor::{Draft, Drafts, OutOfSync},
+    editor::{Draft, Drafts, Failures, OutOfSync},
     model::{DEFAULT_NOTEBOOK, Note, Preferences, Units},
     storage::{self, Command, Event},
     sync::{self, SyncHandle},
@@ -51,8 +52,7 @@ pub struct Core {
 
 struct Shared {
     drafts: Mutex<Drafts>,
-    /// Commands that failed and can be sent again, one per kind and note.
-    failed: Mutex<Vec<Command>>,
+    failed: Mutex<Failures>,
     default_notebook: Mutex<String>,
 }
 
@@ -154,16 +154,9 @@ impl Core {
     /// Sends the failed commands again. A failed save resends everything
     /// since the last confirmed one, including edits made after it.
     pub fn retry(&self) {
-        let failed = std::mem::take(&mut *self.shared.failed.lock().unwrap());
-        for command in failed {
-            if let Command::Edit { id, .. } = &command {
-                let resend = self.drafts().resend(id);
-                if let Some(command) = resend {
-                    self.send(command);
-                }
-            } else {
-                self.send(command);
-            }
+        let commands = self.shared.failed.lock().unwrap().retry(&mut self.drafts());
+        for command in commands {
+            self.send(command);
         }
         self.send_drafts();
     }
@@ -185,6 +178,11 @@ impl Core {
         self.drafts().get(&id).map(Draft::text)
     }
 
+    /// An open draft's notebook and trash state, as of the latest events.
+    pub fn draft_note(&self, id: String) -> Option<NoteInfo> {
+        self.drafts().get(&id).map(|d| d.note().into())
+    }
+
     /// Records that the note is showing, so `trim_drafts` closes it last.
     pub fn show_draft(&self, id: String) {
         if let Some(draft) = self.drafts().get_mut(&id) {
@@ -192,19 +190,15 @@ impl Core {
         }
     }
 
-    /// Typing that the text widget already shows.
-    pub fn insert(&self, id: String, at: i32, text: String) -> Result<(), CoreError> {
-        self.typing(&id, |d| d.insert(unit(at)?, &text))
-    }
-
-    pub fn delete(&self, id: String, at: i32, len: i32) -> Result<(), CoreError> {
-        self.typing(&id, |d| d.delete(unit(at)?, unit(len)?))
-    }
-
-    /// Replaces `len` units at `at`, recording only what actually differs,
-    /// which suits a `TextWatcher`'s `onTextChanged`.
+    /// Typing that the text widget already shows: replaces `len` units at
+    /// `at`, recording only what actually differs, which suits a
+    /// `TextWatcher`'s `onTextChanged`.
     pub fn replace(&self, id: String, at: i32, len: i32, text: String) -> Result<(), CoreError> {
-        self.typing(&id, |d| d.replace(unit(at)?, unit(len)?, &text))
+        let mut drafts = self.drafts();
+        let draft = drafts.get_mut(&id).ok_or_else(|| CoreError::OutOfSync {
+            reason: format!("No draft is open for note {id}"),
+        })?;
+        Ok(draft.replace(unit(at)?, unit(len)?, &text)?)
     }
 
     /// `None` if there's nothing to undo.
@@ -240,9 +234,9 @@ impl Core {
     }
 
     /// Closes the least recently shown drafts beyond the cache limit, never
-    /// `active` or one with unsaved edits, and returns their IDs.
-    pub fn trim_drafts(&self, active: Option<String>) -> Vec<String> {
-        self.drafts().trim(active.as_deref())
+    /// `active` or one with unsaved edits.
+    pub fn trim_drafts(&self, active: Option<String>) {
+        self.drafts().trim(active.as_deref());
     }
 
     pub fn sync(&self, control: SyncControl) {
@@ -265,20 +259,6 @@ impl Core {
 
     fn drafts(&self) -> MutexGuard<'_, Drafts> {
         self.shared.drafts.lock().unwrap()
-    }
-
-    fn typing(
-        &self,
-        id: &str,
-        edit: impl FnOnce(&mut Draft) -> Result<(), OutOfSync>,
-    ) -> Result<(), CoreError> {
-        let mut drafts = self.drafts();
-        let draft = drafts.get_mut(id).ok_or_else(|| CoreError::OutOfSync {
-            reason: format!("No draft is open for note {id}"),
-        })?;
-        edit(draft).map_err(|error| CoreError::OutOfSync {
-            reason: error.to_string(),
-        })
     }
 }
 
@@ -337,70 +317,34 @@ impl Shared {
             }
             Event::Saved { id, sequence } => {
                 self.drafts.lock().unwrap().saved(&id, sequence);
-                self.failed.lock().unwrap().retain(|c| {
-                    !matches!(c, Command::Edit { id: failed, sequence: s, .. } if *failed == id && *s <= sequence)
-                });
+                self.failed.lock().unwrap().saved(&id, sequence);
                 CoreEvent::Saved { id }
             }
             Event::Mutated {
                 mutation,
                 notebooks,
-            } => CoreEvent::Mutated {
-                mutation: mutation.into(),
-                notebooks: types::notebooks(notebooks),
-            },
+            } => {
+                let default_notebook = self.default_notebook.lock().unwrap().clone();
+                self.drafts
+                    .lock()
+                    .unwrap()
+                    .mutated(&mutation, &default_notebook);
+                CoreEvent::Mutated {
+                    mutation: mutation.into(),
+                    notebooks: types::notebooks(notebooks),
+                }
+            }
             Event::NoteDelta { id, delta } => CoreEvent::NoteDelta { id, delta },
             Event::Remote { notes, notebooks } => CoreEvent::Remote {
-                notes: notes.into_iter().map(Into::into).collect(),
+                trashed: self.drafts.lock().unwrap().remote(&notes),
                 notebooks: notebooks.map(types::notebooks),
             },
             Event::Flushed => CoreEvent::Flushed,
-            Event::Error { command, message } => {
-                let retryable = matches!(
-                    command,
-                    Command::Edit { .. }
-                        | Command::Create(_)
-                        | Command::Initialize
-                        | Command::Preferences(_)
-                );
-                let operation = operation(&command).into();
-                if retryable {
-                    let mut failed = self.failed.lock().unwrap();
-                    failed.retain(|old| failure_key(old) != failure_key(&command));
-                    failed.push(command);
-                }
-                CoreEvent::Error {
-                    operation,
-                    message,
-                    retryable,
-                }
-            }
+            Event::Error { command, message } => CoreEvent::Error {
+                operation: (&command).into(),
+                message,
+                retryable: self.failed.lock().unwrap().record(command),
+            },
         }
-    }
-}
-
-fn operation(command: &Command) -> &'static str {
-    match command {
-        Command::Initialize => "open",
-        Command::List { .. } => "list",
-        Command::Load { .. } => "load",
-        Command::Create(_) => "create",
-        Command::Save { .. } | Command::Edit { .. } => "save",
-        Command::Mutate(_) => "change",
-        Command::Preferences(_) => "preferences",
-        Command::Remote { .. } | Command::Attach(_) => "sync",
-        Command::Flush => "flush",
-    }
-}
-
-/// Failures with the same key replace each other: a newer failed save of a
-/// note supersedes an older one.
-fn failure_key(command: &Command) -> String {
-    match command {
-        Command::Edit { id, .. } => format!("save:{id}"),
-        Command::Create(note) => format!("create:{}", note.id),
-        Command::Initialize => "initialize".into(),
-        Command::Preferences(_) => "preferences".into(),
-        _ => "other".into(),
     }
 }

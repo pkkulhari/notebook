@@ -114,18 +114,13 @@ impl MarkdownDocument {
             .collect()
     }
 
-    /// The Markdown syntax to hide between `from` and `to`, leaving visible
-    /// the blocks the selection from `start` to `end` touches. No range
-    /// contains a line break: an Android `ReplacementSpan` can't cross one, so
-    /// a setext heading's underline is hidden but its line stays.
-    pub fn hidden_outside(&self, start: i32, end: i32, from: i32, to: i32) -> Vec<TextRange> {
+    /// The Markdown syntax to hide, leaving visible the blocks the selection
+    /// from `start` to `end` touches. No range contains a line break: an
+    /// Android `ReplacementSpan` can't cross one, so a setext heading's
+    /// underline is hidden but its line stays.
+    pub fn hidden_outside(&self, start: i32, end: i32) -> Vec<TextRange> {
         let mut ranges = vec![];
-        let within = self
-            .document
-            .hidden_outside(start..end)
-            .into_iter()
-            .filter(|hidden| hidden.end > from && hidden.start < to);
-        for hidden in within {
+        for hidden in self.document.hidden_outside(start..end) {
             let first = self.line_breaks.partition_point(|&at| at < hidden.start);
             let mut from = hidden.start;
             for &at in self.line_breaks[first..]
@@ -151,25 +146,13 @@ impl MarkdownDocument {
     }
 
     /// The link at `position`, if it's one the app may open: http, https or
-    /// mailto, as on the desktop.
+    /// mailto.
     pub fn link_at(&self, position: i32) -> Option<String> {
-        self.document
-            .links
-            .iter()
-            .find(|(range, _)| range.contains(&position))
-            .map(|(_, url)| url.clone())
-            .filter(|url| {
-                url.starts_with("https://")
-                    || url.starts_with("http://")
-                    || url.starts_with("mailto:")
-            })
+        self.document.link_at(position).map(Into::into)
     }
 
     pub fn in_code_block(&self, position: i32) -> bool {
-        self.document
-            .spans
-            .iter()
-            .any(|span| span.style == "code-block" && span.range.contains(&position))
+        self.document.in_code_block(position)
     }
 }
 

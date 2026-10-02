@@ -34,6 +34,14 @@ impl std::fmt::Display for CoreError {
 
 impl std::error::Error for CoreError {}
 
+impl From<editor::OutOfSync> for CoreError {
+    fn from(error: editor::OutOfSync) -> Self {
+        CoreError::OutOfSync {
+            reason: error.to_string(),
+        }
+    }
+}
+
 /// A note without its text, which comes from the draft.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NoteInfo {
@@ -135,24 +143,6 @@ pub struct NoteCount {
     pub count: i64,
 }
 
-/// A note's place and trash state after another device changed it.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
-pub struct NoteState {
-    pub id: String,
-    pub notebook_id: String,
-    pub deleted: bool,
-}
-
-impl From<storage::NoteState> for NoteState {
-    fn from(note: storage::NoteState) -> Self {
-        Self {
-            id: note.id,
-            notebook_id: note.notebook_id,
-            deleted: note.deleted,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Mutation {
     CreateNotebook { id: String, name: String },
@@ -231,9 +221,10 @@ pub enum CoreEvent {
         id: String,
         delta: Vec<u8>,
     },
-    /// Another device changed these notes, and maybe the notebooks.
+    /// Another device moved, trashed or restored notes, and maybe changed
+    /// the notebooks. `trashed` lists the open drafts it moved to the trash.
     Remote {
-        notes: Vec<NoteState>,
+        trashed: Vec<String>,
         notebooks: Option<Vec<Notebook>>,
     },
     /// Every command sent before `flush` is done.
@@ -241,10 +232,42 @@ pub enum CoreEvent {
     /// `retryable` errors are kept, and `retry` sends them again. The open
     /// drafts keep their text either way.
     Error {
-        operation: String,
+        operation: Operation,
         message: String,
         retryable: bool,
     },
+}
+
+/// What storage was doing when it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum Operation {
+    Open,
+    List,
+    Load,
+    Create,
+    Save,
+    /// A `Mutation`, whose message is already fit to show.
+    Change,
+    Preferences,
+    Sync,
+    Flush,
+}
+
+impl From<&storage::Command> for Operation {
+    fn from(command: &storage::Command) -> Self {
+        use storage::Command;
+        match command {
+            Command::Initialize => Operation::Open,
+            Command::List { .. } => Operation::List,
+            Command::Load { .. } => Operation::Load,
+            Command::Create(_) => Operation::Create,
+            Command::Save { .. } | Command::Edit { .. } => Operation::Save,
+            Command::Mutate(_) => Operation::Change,
+            Command::Preferences(_) => Operation::Preferences,
+            Command::Remote { .. } | Command::Attach(_) => Operation::Sync,
+            Command::Flush => Operation::Flush,
+        }
+    }
 }
 
 /// A change to apply to the text widget, in order. Each position refers to the

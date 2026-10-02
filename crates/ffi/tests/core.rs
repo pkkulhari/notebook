@@ -152,8 +152,11 @@ fn ready_brings_a_note_and_sync_reports_its_status() {
 fn typing_after_an_emoji_is_saved_after_a_pause() {
     let phone = Phone::start();
     let id = phone.ready();
-    phone.core.insert(id.clone(), 0, "🌿 tea".into()).unwrap();
-    phone.core.insert(id.clone(), 2, "!".into()).unwrap();
+    phone
+        .core
+        .replace(id.clone(), 0, 0, "🌿 tea".into())
+        .unwrap();
+    phone.core.replace(id.clone(), 2, 0, "!".into()).unwrap();
     assert_eq!(phone.core.draft_text(id.clone()).unwrap(), "🌿! tea");
     let first = phone.core.tick();
     assert!((1..=300).contains(&first), "{first}");
@@ -166,7 +169,10 @@ fn typing_after_an_emoji_is_saved_after_a_pause() {
 fn imported_changes_come_back_in_utf16_units() {
     let phone = Phone::start();
     let id = phone.ready();
-    phone.core.insert(id.clone(), 0, "🌿! tea".into()).unwrap();
+    phone
+        .core
+        .replace(id.clone(), 0, 0, "🌿! tea".into())
+        .unwrap();
     phone.save_all();
     phone.events.saved(&id);
     phone.import_deltas(&id);
@@ -194,19 +200,22 @@ fn imported_changes_come_back_in_utf16_units() {
 fn positions_outside_the_draft_are_out_of_sync() {
     let phone = Phone::start();
     let id = phone.ready();
-    phone.core.insert(id.clone(), 0, "🌿 ok".into()).unwrap();
+    phone
+        .core
+        .replace(id.clone(), 0, 0, "🌿 ok".into())
+        .unwrap();
     let out_of_sync = |result: Result<(), CoreError>| {
         assert!(
             matches!(result, Err(CoreError::OutOfSync { .. })),
             "{result:?}"
         );
     };
-    out_of_sync(phone.core.insert(id.clone(), 6, "x".into()));
-    out_of_sync(phone.core.insert(id.clone(), -1, "x".into()));
-    out_of_sync(phone.core.insert(id.clone(), 1, "x".into()));
-    out_of_sync(phone.core.delete(id.clone(), 3, 9));
+    out_of_sync(phone.core.replace(id.clone(), 6, 0, "x".into()));
+    out_of_sync(phone.core.replace(id.clone(), -1, 0, "x".into()));
+    out_of_sync(phone.core.replace(id.clone(), 1, 0, "x".into()));
+    out_of_sync(phone.core.replace(id.clone(), 3, 9, String::new()));
     out_of_sync(phone.core.replace(id.clone(), 4, -1, "x".into()));
-    out_of_sync(phone.core.insert("no-such-note".into(), 0, "x".into()));
+    out_of_sync(phone.core.replace("no-such-note".into(), 0, 0, "x".into()));
     assert_eq!(phone.core.draft_text(id).unwrap(), "🌿 ok");
 }
 
@@ -215,10 +224,13 @@ fn flushed_follows_every_earlier_save() {
     let phone = Phone::start();
     let id = phone.ready();
     let new = phone.core.create_note();
-    phone.core.insert(id.clone(), 0, "first".into()).unwrap();
     phone
         .core
-        .insert(new.id.clone(), 0, "second".into())
+        .replace(id.clone(), 0, 0, "first".into())
+        .unwrap();
+    phone
+        .core
+        .replace(new.id.clone(), 0, 0, "second".into())
         .unwrap();
     phone.core.flush();
     phone
@@ -245,19 +257,25 @@ fn a_failed_save_is_kept_and_retried_with_later_edits() {
     inspection
         .execute_batch("CREATE TRIGGER fail_save BEFORE UPDATE OF body ON notes BEGIN SELECT RAISE(ABORT, 'test failure'); END")
         .unwrap();
-    phone.core.insert(id.clone(), 0, "unsaved".into()).unwrap();
+    phone
+        .core
+        .replace(id.clone(), 0, 0, "unsaved".into())
+        .unwrap();
     phone.core.flush();
     let retryable = phone.events.wait("an error", |e| match e {
         CoreEvent::Error {
             operation,
             retryable,
             ..
-        } => Some((operation.clone(), *retryable)),
+        } => Some((*operation, *retryable)),
         _ => None,
     });
-    assert_eq!(retryable, ("save".into(), true));
+    assert_eq!(retryable, (Operation::Save, true));
     assert!(phone.core.has_failures());
-    phone.core.insert(id.clone(), 7, " newest".into()).unwrap();
+    phone
+        .core
+        .replace(id.clone(), 7, 0, " newest".into())
+        .unwrap();
     inspection.execute_batch("DROP TRIGGER fail_save").unwrap();
     phone.core.retry();
     phone.events.saved(&id);
@@ -334,19 +352,11 @@ fn hidden_ranges_never_cross_a_line_break() {
     let units: Vec<u16> = text.encode_utf16().collect();
     let end = units.len() as i32;
     let hidden: Vec<String> = document
-        .hidden_outside(end, end, 0, end)
+        .hidden_outside(end, end)
         .iter()
         .map(|r| String::from_utf16(&units[r.start as usize..r.end as usize]).unwrap())
         .collect();
     assert_eq!(hidden, ["===", "**", "**"]);
-    // Only syntax that reaches into the window comes back.
-    let bold = "Title\n===\n\n".encode_utf16().count() as i32;
-    let starts: Vec<i32> = document
-        .hidden_outside(end, end, bold, bold + 1)
-        .iter()
-        .map(|r| r.start)
-        .collect();
-    assert_eq!(starts, [bold]);
     // The cursor in "Next" makes only that paragraph active.
     let next = text.encode_utf16().count() as i32 - 4;
     assert_eq!(

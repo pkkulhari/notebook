@@ -13,6 +13,7 @@ import com.pkkulhari.notebook.core.Mutation
 import com.pkkulhari.notebook.core.NoteInfo
 import com.pkkulhari.notebook.core.NoteSummary
 import com.pkkulhari.notebook.core.Notebook
+import com.pkkulhari.notebook.core.Operation
 import com.pkkulhari.notebook.core.SyncControl
 import com.pkkulhari.notebook.core.SyncStatus
 import java.io.File
@@ -88,7 +89,6 @@ class Store(
     /** Whether an activity is showing; sync runs only then. */
     private var visible = false
 
-    private val drafts = mutableMapOf<String, NoteInfo>()
     private var listGeneration = 0L
     private var loadGeneration = 0L
 
@@ -99,7 +99,7 @@ class Store(
         core.initialize()
     }
 
-    val activeNote: NoteInfo? get() = active?.let(drafts::get)
+    val activeNote: NoteInfo? get() = active?.let(core::draftNote)
 
     fun title(): String = when {
         query.isNotBlank() -> context.getString(R.string.search_results)
@@ -136,7 +136,6 @@ class Store(
                 defaultNotebookId = event.defaultNotebookId
                 notebooks = event.notebooks
                 filter = Filter.Notebook(event.note.notebookId)
-                drafts[event.note.id] = event.note
                 val text = core.openDraft(event.note, event.snapshot)
                 // Back where the last session ended, or straight to writing
                 // on a first start.
@@ -154,26 +153,16 @@ class Store(
             is CoreEvent.Loaded -> {
                 if (event.generation != loadGeneration) return
                 val note = event.note ?: return refreshList()
-                drafts[note.id] = note
                 show(note, core.openDraft(note, event.snapshot), 0, focus = false)
             }
             is CoreEvent.Created -> refreshList()
             is CoreEvent.Saved -> {
                 if (problem?.retryable == true && !core.hasFailures()) setProblem(null)
-                core.trimDrafts(active).forEach(drafts::remove)
+                core.trimDrafts(active)
                 refreshList()
             }
             is CoreEvent.Mutated -> {
                 notebooks = event.notebooks
-                when (val mutation = event.mutation) {
-                    is Mutation.Move -> update(mutation.id) { it.copy(notebookId = mutation.notebookId) }
-                    is Mutation.Trash -> update(mutation.id) { it.copy(deleted = true) }
-                    is Mutation.Restore -> update(mutation.id) { it.copy(deleted = false) }
-                    is Mutation.DeleteNotebook -> for (id in drafts.keys.toList()) {
-                        update(id) { if (it.notebookId == mutation.id) it.copy(notebookId = defaultNotebookId) else it }
-                    }
-                    else -> {}
-                }
                 leaveMissingNotebook()
                 listener?.activeChanged()
                 listener?.listChanged()
@@ -182,7 +171,6 @@ class Store(
             is CoreEvent.NoteDelta -> {
                 // Every change for an open draft is imported, in order, even
                 // the echoes of its own saves; later changes depend on them.
-                if (event.id !in drafts) return
                 val applied = core.importDelta(event.id, event.delta)
                 if (event.id == active) listener?.applied(applied)
             }
@@ -191,28 +179,20 @@ class Store(
                     notebooks = it
                     leaveMissingNotebook()
                 }
-                val trashedHere = event.notes.any { it.id == active && it.deleted && drafts[it.id]?.deleted == false }
-                for (note in event.notes) {
-                    update(note.id) { it.copy(notebookId = note.notebookId, deleted = note.deleted) }
-                }
                 listener?.activeChanged()
-                if (trashedHere && filter !is Filter.Trash) closeNote()
+                if (active in event.trashed && filter !is Filter.Trash) closeNote()
                 listener?.listChanged()
                 refreshList()
             }
             is CoreEvent.Flushed -> {}
             is CoreEvent.Error -> setProblem(
                 Problem(
-                    if (event.operation == "change") event.message
+                    if (event.operation == Operation.CHANGE) event.message
                     else context.getString(R.string.problem, event.message),
                     event.retryable,
                 ),
             )
         }
-    }
-
-    private fun update(id: String, change: (NoteInfo) -> NoteInfo) {
-        drafts[id]?.let { drafts[id] = change(it) }
     }
 
     private fun leaveMissingNotebook() {
@@ -264,7 +244,7 @@ class Store(
     fun openNote(id: String) {
         cancelPendingLoad()
         core.flush()
-        val note = drafts[id]
+        val note = core.draftNote(id)
         val text = core.draftText(id)
         if (note != null && text != null) {
             show(note, text, 0, focus = false)
@@ -278,7 +258,6 @@ class Store(
         cancelPendingLoad()
         core.flush()
         val note = core.createNote()
-        drafts[note.id] = note
         filter = Filter.Notebook(defaultNotebookId)
         query = ""
         // Notify even when already empty: the widget may have a pending search.
@@ -290,7 +269,7 @@ class Store(
         active = note.id
         this.cursor = cursor
         core.showDraft(note.id)
-        core.trimDrafts(note.id).forEach(drafts::remove)
+        core.trimDrafts(note.id)
         listener?.opened(note, text, cursor, focus)
     }
 
@@ -300,7 +279,7 @@ class Store(
         core.flush()
         active = null
         listener?.closed()
-        core.trimDrafts(null).forEach(drafts::remove)
+        core.trimDrafts(null)
         if (listStale) requestList()
     }
 

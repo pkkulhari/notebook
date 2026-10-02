@@ -1,6 +1,6 @@
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use notebook_core::{
-    editor::{Applied, Draft, Drafts, OutOfSync, TextEdit},
+    editor::{Applied, Draft, Drafts, Failures, OutOfSync, TextEdit},
     markdown::{self, Document},
     model::*,
     storage::{self, Command, Event, Mutation},
@@ -38,7 +38,7 @@ struct State {
     parse_due: Option<Instant>,
     document: Document,
     hidden_applied: Vec<std::ops::Range<i32>>,
-    failed: Vec<Command>,
+    failed: Failures,
     closing: bool,
     ready: bool,
     select_first: bool,
@@ -517,7 +517,7 @@ fn build(
             parse_due: None,
             document: Document::default(),
             hidden_applied: vec![],
-            failed: vec![],
+            failed: Failures::default(),
             closing: false,
             ready: false,
             select_first: false,
@@ -712,15 +712,9 @@ impl Ui {
                     .state
                     .borrow()
                     .document
-                    .links
-                    .iter()
-                    .find(|(range, _)| range.contains(&iter.offset()))
-                    .map(|(_, url)| url.clone());
-                if let Some(url) = url
-                    && (url.starts_with("https://")
-                        || url.starts_with("http://")
-                        || url.starts_with("mailto:"))
-                {
+                    .link_at(iter.offset())
+                    .map(str::to_owned);
+                if let Some(url) = url {
                     gio::AppInfo::launch_default_for_uri_async(
                         &url,
                         None::<&gio::AppLaunchContext>,
@@ -770,17 +764,13 @@ impl Ui {
         let weak = Rc::downgrade(self);
         self.retry.connect_clicked(move |_| {
             if let Some(ui) = weak.upgrade() {
-                let failed = std::mem::take(&mut ui.state.borrow_mut().failed);
+                let commands = {
+                    let s = &mut *ui.state.borrow_mut();
+                    s.failed.retry(&mut s.drafts)
+                };
                 ui.error_box.set_visible(false);
-                for command in failed {
-                    if let Command::Edit { id, .. } = command {
-                        let resend = ui.state.borrow_mut().drafts.resend(&id);
-                        if let Some(command) = resend {
-                            ui.send(command);
-                        }
-                    } else {
-                        ui.send(command);
-                    }
+                for command in commands {
+                    ui.send(command);
                 }
                 ui.flush_drafts();
             }
@@ -1334,14 +1324,7 @@ impl Ui {
             return false;
         }
         let mut cursor = buffer.iter_at_mark(&buffer.get_insert());
-        let in_code = self
-            .state
-            .borrow()
-            .document
-            .spans
-            .iter()
-            .any(|span| span.style == "code-block" && span.range.contains(&cursor.offset()));
-        if in_code {
+        if self.state.borrow().document.in_code_block(cursor.offset()) {
             return false;
         }
         let mut start = cursor;
@@ -1682,7 +1665,7 @@ impl Ui {
                 {
                     let mut s = self.state.borrow_mut();
                     s.drafts.saved(&id, sequence);
-                    s.failed.retain(|c| !matches!(c, Command::Edit { id: failed_id, sequence: failed_seq, .. } if failed_id == &id && *failed_seq <= sequence));
+                    s.failed.saved(&id, sequence);
                     if s.failed.is_empty() {
                         self.error_box.set_visible(false);
                     }
@@ -1697,36 +1680,15 @@ impl Ui {
             } => {
                 {
                     let mut s = self.state.borrow_mut();
+                    let s = &mut *s;
                     s.notebooks = notebooks;
-                    match mutation {
-                        Mutation::Move { id, notebook_id } => {
-                            if let Some(d) = s.drafts.get_mut(&id) {
-                                d.note_mut().notebook_id = notebook_id;
-                            }
-                        }
-                        Mutation::Trash { id } => {
-                            if let Some(d) = s.drafts.get_mut(&id) {
-                                d.note_mut().deleted = true;
-                            }
-                            if s.active.as_ref() == Some(&id) && s.filter != Filter::Trash {
-                                s.select_first = true;
-                                s.load_generation += 1;
-                            }
-                        }
-                        Mutation::Restore { id } => {
-                            if let Some(d) = s.drafts.get_mut(&id) {
-                                d.note_mut().deleted = false;
-                            }
-                        }
-                        Mutation::DeleteNotebook { id } => {
-                            let default_id = s.default_notebook_id.clone();
-                            for d in s.drafts.iter_mut() {
-                                if d.note().notebook_id == id {
-                                    d.note_mut().notebook_id = default_id.clone();
-                                }
-                            }
-                        }
-                        _ => {}
+                    s.drafts.mutated(&mutation, &s.default_notebook_id);
+                    if let Mutation::Trash { id } = &mutation
+                        && s.active.as_ref() == Some(id)
+                        && s.filter != Filter::Trash
+                    {
+                        s.select_first = true;
+                        s.load_generation += 1;
                     }
                     s.leave_missing_notebook();
                     if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
@@ -1760,19 +1722,12 @@ impl Ui {
                         s.notebooks = notebooks;
                         s.leave_missing_notebook();
                     }
-                    for note in notes {
-                        let trashed_here = s.active.as_ref() == Some(&note.id)
-                            && s.filter != Filter::Trash
-                            && note.deleted;
-                        if let Some(d) = s.drafts.get_mut(&note.id) {
-                            let was_deleted = d.note().deleted;
-                            d.note_mut().notebook_id = note.notebook_id;
-                            d.note_mut().deleted = note.deleted;
-                            if trashed_here && !was_deleted {
-                                s.select_first = true;
-                                s.load_generation += 1;
-                            }
-                        }
+                    let trashed = s.drafts.remote(&notes);
+                    if s.filter != Filter::Trash
+                        && s.active.as_ref().is_some_and(|id| trashed.contains(id))
+                    {
+                        s.select_first = true;
+                        s.load_generation += 1;
                     }
                     if let Some(d) = s.active.as_ref().and_then(|id| s.drafts.get(id)) {
                         self.editor.set_editable(!d.note().deleted);
@@ -1794,17 +1749,7 @@ impl Ui {
                 self.window.set_sensitive(true);
                 let mut s = self.state.borrow_mut();
                 s.closing = false;
-                if matches!(
-                    command,
-                    Command::Edit { .. }
-                        | Command::Create(_)
-                        | Command::Initialize
-                        | Command::Preferences(_)
-                ) {
-                    s.failed
-                        .retain(|old| failure_key(old) != failure_key(&command));
-                    s.failed.push(command);
-                }
+                s.failed.record(command);
                 self.retry.set_label(if s.failed.is_empty() {
                     "Dismiss"
                 } else {
@@ -2294,16 +2239,6 @@ fn wrapped_label(text: &str, class: &str) -> gtk::Label {
     label.set_max_width_chars(1);
     label.add_css_class(class);
     label
-}
-
-fn failure_key(command: &Command) -> String {
-    match command {
-        Command::Edit { id, .. } => format!("save:{id}"),
-        Command::Create(note) => format!("create:{}", note.id),
-        Command::Initialize => "initialize".into(),
-        Command::Preferences(_) => "preferences".into(),
-        _ => "other".into(),
-    }
 }
 
 fn configure_tags(buffer: &gtk::TextBuffer) {

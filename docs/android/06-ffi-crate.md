@@ -45,9 +45,9 @@ jni = { version = "0.22", default-features = false }
 
 These rules keep the text widget and the editor's document identical. Both the Rust and Kotlin sides must follow them.
 
-1. **Every call that changes or reads a draft's text happens on the Android main thread**, in the same order as the `EditText` changes. That covers `openDraft`, `insert`, `delete`, `replace`, `undo`, `redo` and `importDelta`.
+1. **Every call that changes or reads a draft's text happens on the Android main thread**, in the same order as the `EditText` changes. That covers `openDraft`, `replace`, `undo`, `redo` and `importDelta`.
 2. **A storage change to an open note reaches Kotlin as an event.** Kotlin then calls `importDelta` on the main thread and applies the returned edits at once. The FFI layer never imports into a draft on its own thread. If it did, the document would get ahead of the `EditText`, and the next keystroke would land in the wrong place.
-3. **Bookkeeping that doesn't change text is handled in Rust as soon as the event arrives:** `Saved` → `drafts.saved`, `Created` → `drafts.created`, and failed saves recorded for retry. The event is then forwarded to Kotlin.
+3. **Bookkeeping that doesn't change text is handled in Rust as soon as the event arrives:** `Saved` → `drafts.saved`, `Created` → `drafts.created`, `Mutated` and `Remote` → the open drafts' notebooks and trash state, and failed saves recorded for retry. The event is then forwarded to Kotlin.
 4. **`Drafts` sits behind a `Mutex`.** The main thread holds it only for the length of a call, and the event thread holds it only for bookkeeping.
 5. **Listener callbacks run on a Rust thread.** Kotlin posts them to the main thread before touching any UI or calling back into `Core`.
 
@@ -87,8 +87,6 @@ impl Core {
 
     // Editor (main thread only)
     pub fn open_draft(&self, note: NoteInfo, snapshot: Vec<u8>) -> String;   // returns text
-    pub fn insert(&self, id: String, at: i32, text: String) -> Result<(), CoreError>;
-    pub fn delete(&self, id: String, at: i32, len: i32) -> Result<(), CoreError>;
     pub fn replace(&self, id: String, at: i32, len: i32, text: String) -> Result<(), CoreError>;
     pub fn undo(&self, id: String) -> Option<Applied>;
     pub fn redo(&self, id: String) -> Option<Applied>;
@@ -114,7 +112,7 @@ impl Core {
 - `Loaded { note, snapshot, generation }`
 - `Created { id }` and `Saved { id }`
 - `Mutated { mutation, notebooks }`
-- `NoteDelta { id, delta }` and `Remote { notes, notebooks }`
+- `NoteDelta { id, delta }` and `Remote { trashed, notebooks }`, where `trashed` lists the open drafts another device moved to the trash
 - `Flushed`
 - `Error { operation, message, retryable }`
 
@@ -127,7 +125,7 @@ A thread named `notebook-events`, owned by `Core`, blocks on the storage `Receiv
 | `Filter` | `uniffi::Enum`: `Notebook { id }`, `All`, `Trash` |
 | `NoteCounts` (`HashMap<Filter, u64>`) | `Vec<NoteCount { filter, count: i64 }>` |
 | `Note` | `NoteInfo { id, notebook_id, deleted }` (no body; the text comes from the draft) |
-| `NoteSummary`, `Notebook`, `NoteState`, `Mutation` | records or enums with the same fields |
+| `NoteSummary`, `Notebook`, `Mutation` | records or enums with the same fields |
 | `TextEdit`, `Applied` | `uniffi::Enum` and `Record`, positions as `i32` UTF-16 units |
 | `sync::Status` | `SyncStatus` without `EndpointAddr`: `running: bool` replaces `addr` |
 | `sync::Pairing` | `uniffi::Enum` |
@@ -176,9 +174,9 @@ Add an optional `logcat` feature, on only in debug builds. It installs a `tracin
 ## Tests (host, in `crates/ffi/tests`)
 
 1. `start` in a temp directory with a recording listener, then `initialize`: `Ready` arrives with a note.
-2. `open_draft`, `insert` after an emoji, then `tick` after 300 ms: `Saved` arrives, and reloading from storage shows the same text.
+2. `open_draft`, `replace` after an emoji, then `tick` after 300 ms: `Saved` arrives, and reloading from storage shows the same text.
 3. `import_delta` built from a second `Repository`'s change returns edits in UTF-16 units that turn the old text into the new.
-4. `insert` with a position past the end returns `OutOfSync` and leaves the draft unchanged.
+4. `replace` with a position past the end returns `OutOfSync` and leaves the draft unchanged.
 5. `flush` followed by `Flushed`: every earlier save is acknowledged first.
 6. Dropping `Core` stops the event thread and the sync thread; the test must not hang.
 
@@ -189,11 +187,11 @@ Add an optional `logcat` feature, on only in debug builds. It installs a `tracin
   - `draft_text(id)`, to show a cached draft again without reloading it.
   - `show_draft(id)`, which records that a draft is showing so `trim_drafts` closes it last.
   - `has_failures()`, to hide the error bar once retries succeed.
-  - `trim_drafts` returns the IDs it closed.
+  - `draft_note(id)`, an open draft's notebook and trash state, kept current by `Mutated` and `Remote` (rule 3), so Kotlin keeps no copy.
   - `Ready` carries the saved `selected_note` and `cursor`.
 - **`create_note` puts the note in the default notebook**, using the `default_notebook_id` from `Ready`. Storage puts new notes there anyway.
-- **`link_at` returns only http, https and mailto links**, the same rule as the desktop, so Kotlin has nothing to filter.
-- **Error operations** are "open", "list", "load", "create", "save", "change", "preferences", "sync" and "flush". Failures of saves, creates, initialization and preferences are retryable, as on the desktop.
+- **`link_at` returns only http, https and mailto links**: it calls core's `Document::link_at`, as the desktop does, so Kotlin has nothing to filter.
+- **Error operations** are an `Operation` enum: `Open`, `List`, `Load`, `Create`, `Save`, `Change`, `Preferences`, `Sync` and `Flush`. Failures of saves, creates, initialization and preferences are retryable; core's `editor::Failures` keeps them for both apps.
 - **Bindings:** the Kotlin file has about 5,100 lines. `CoreError` becomes `CoreException`, and records become `data class`es.
 - **Kotlin's listener must catch its own exceptions.** An exception thrown from `on_event` reaches Rust as a callback error, on the event thread.
 - **Android build:** the library builds for arm64 with and without `logcat`, and exports `Java_com_pkkulhari_notebook_AndroidContext_install` plus the UniFFI functions.

@@ -3,13 +3,14 @@
 //! The UI's text widget mirrors a draft's document: typing is written into the
 //! document, and the document's imports and undos come back as [`TextEdit`]s
 //! for the UI to apply. Drafts decide when to save and what each save holds,
-//! and return storage commands for the UI to send.
+//! and return storage commands for the UI to send; [`Failures`] keeps those
+//! storage couldn't carry out, to send again.
 //!
 //! Every position is in the `Units` the drafts were created with.
 use crate::{
     crdt,
     model::{Note, Units},
-    storage::Command,
+    storage::{Command, Mutation, NoteState},
 };
 use loro::{
     ContainerTrait, ExportMode, LoroDoc, TextDelta, UndoManager, VersionVector, cursor::PosType,
@@ -136,10 +137,6 @@ impl Draft {
         &self.note
     }
 
-    pub fn note_mut(&mut self) -> &mut Note {
-        &mut self.note
-    }
-
     pub fn text(&self) -> String {
         crdt::text(&self.doc).to_string()
     }
@@ -168,25 +165,11 @@ impl Draft {
     // Typing: the UI's text already shows these changes.
 
     pub fn insert(&mut self, at: usize, text: &str) -> Result<(), OutOfSync> {
-        let at = self.char_position(at)?;
-        if !text.is_empty() {
-            crdt::text(&self.doc)
-                .insert(at, text)
-                .map_err(|_| OutOfSync)?;
-            self.typed();
-        }
-        Ok(())
+        self.replace(at, 0, text)
     }
 
     pub fn delete(&mut self, at: usize, len: usize) -> Result<(), OutOfSync> {
-        let (start, end) = self.char_range(at, len)?;
-        if end > start {
-            crdt::text(&self.doc)
-                .delete(start, end - start)
-                .map_err(|_| OutOfSync)?;
-            self.typed();
-        }
-        Ok(())
+        self.replace(at, len, "")
     }
 
     /// Replaces `len` units at `at`, recording only the part that actually
@@ -287,6 +270,13 @@ impl Draft {
     /// Imports changes from storage, such as another device's edits. A delta
     /// that can't be imported changes nothing.
     pub fn import(&mut self, delta: &[u8]) -> Applied {
+        // Most deltas echo this draft's own saves. They change nothing, so
+        // skip copying the text to measure them.
+        if LoroDoc::decode_import_blob_meta(delta, false)
+            .is_ok_and(|meta| self.doc.oplog_vv().includes_vv(&meta.partial_end_vv))
+        {
+            return Applied::default();
+        }
         let before = self.before_change();
         if self.doc.import(delta).is_err() {
             self.incoming.lock().unwrap().clear();
@@ -341,10 +331,14 @@ impl Draft {
         applied
     }
 
+    /// When unsent edits should be saved: once typing pauses, or after the
+    /// interval while it continues.
+    fn due_at(&self) -> Instant {
+        (self.changed + SAVE_PAUSE).min(self.last_queued + SAVE_INTERVAL)
+    }
+
     fn is_due(&self, now: Instant) -> bool {
-        self.has_unsent()
-            && (now.saturating_duration_since(self.changed) >= SAVE_PAUSE
-                || now.saturating_duration_since(self.last_queued) >= SAVE_INTERVAL)
+        self.has_unsent() && self.due_at() <= now
     }
 
     /// Saves every edit the draft has made since storage last confirmed a save.
@@ -414,10 +408,6 @@ impl Drafts {
         self.drafts.values()
     }
 
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Draft> {
-        self.drafts.values_mut()
-    }
-
     /// Edit commands for drafts whose save is due at `now`.
     pub fn due(&mut self, now: Instant) -> Vec<Command> {
         self.drafts
@@ -433,7 +423,7 @@ impl Drafts {
         self.drafts
             .values()
             .filter(|d| d.has_unsent())
-            .map(|d| (d.changed + SAVE_PAUSE).min(d.last_queued + SAVE_INTERVAL))
+            .map(Draft::due_at)
             .min()
             .map(|due| due.saturating_duration_since(now))
     }
@@ -472,6 +462,47 @@ impl Drafts {
         self.drafts.get_mut(id).map(|d| d.save_command(now))
     }
 
+    /// Brings the open drafts' notes up to date with a change storage made.
+    /// A deleted notebook's notes move to `default_notebook`.
+    pub fn mutated(&mut self, mutation: &Mutation, default_notebook: &str) {
+        match mutation {
+            Mutation::Move { id, notebook_id } => {
+                if let Some(d) = self.drafts.get_mut(id) {
+                    d.note.notebook_id.clone_from(notebook_id);
+                }
+            }
+            Mutation::Trash { id } | Mutation::Restore { id } => {
+                if let Some(d) = self.drafts.get_mut(id) {
+                    d.note.deleted = matches!(mutation, Mutation::Trash { .. });
+                }
+            }
+            Mutation::DeleteNotebook { id } => {
+                for d in self.drafts.values_mut() {
+                    if d.note.notebook_id == *id {
+                        d.note.notebook_id = default_notebook.into();
+                    }
+                }
+            }
+            Mutation::CreateNotebook { .. } | Mutation::RenameNotebook { .. } => {}
+        }
+    }
+
+    /// Brings the open drafts' notes up to date with another device's changes,
+    /// and returns the IDs of those it moved to the trash.
+    pub fn remote(&mut self, notes: &[NoteState]) -> Vec<String> {
+        let mut trashed = vec![];
+        for note in notes {
+            if let Some(d) = self.drafts.get_mut(&note.id) {
+                if note.deleted && !d.note.deleted {
+                    trashed.push(note.id.clone());
+                }
+                d.note.notebook_id.clone_from(&note.notebook_id);
+                d.note.deleted = note.deleted;
+            }
+        }
+        trashed
+    }
+
     /// Closes the least recently shown drafts beyond the cache limit, and
     /// returns their IDs. Never closes the `active` draft or one with edits
     /// storage hasn't confirmed.
@@ -502,6 +533,62 @@ impl Drafts {
                 id
             })
             .collect()
+    }
+}
+
+/// Commands storage couldn't carry out that can be sent again, at most one
+/// per kind and note.
+#[derive(Default)]
+pub struct Failures(Vec<Command>);
+
+impl Failures {
+    /// Keeps a failed command to send again, replacing an older failure of
+    /// the same kind: a newer failed save of a note supersedes an older one.
+    /// Returns whether the command can be retried.
+    pub fn record(&mut self, command: Command) -> bool {
+        let Some(key) = retry_key(&command) else {
+            return false;
+        };
+        self.0.retain(|old| retry_key(old) != Some(key));
+        self.0.push(command);
+        true
+    }
+
+    /// Storage saved the note's edits up to `sequence`, so its earlier failed
+    /// saves are moot.
+    pub fn saved(&mut self, id: &str, sequence: u64) {
+        self.0.retain(|c| {
+            !matches!(c, Command::Edit { id: failed, sequence: s, .. } if failed == id && *s <= sequence)
+        });
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Takes the failures, as commands to send again. A failed save resends
+    /// everything since the note's last confirmed save, including edits made
+    /// after it.
+    pub fn retry(&mut self, drafts: &mut Drafts) -> Vec<Command> {
+        std::mem::take(&mut self.0)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Edit { id, .. } => drafts.resend(&id),
+                command => Some(command),
+            })
+            .collect()
+    }
+}
+
+/// Failures with the same key replace each other. `None` for a command that
+/// can't be retried.
+fn retry_key(command: &Command) -> Option<(&'static str, &str)> {
+    match command {
+        Command::Edit { id, .. } => Some(("save", id)),
+        Command::Create(note) => Some(("create", &note.id)),
+        Command::Initialize => Some(("initialize", "")),
+        Command::Preferences(_) => Some(("preferences", "")),
+        _ => None,
     }
 }
 
