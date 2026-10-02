@@ -3,22 +3,27 @@ package com.pkkulhari.notebook
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
+import android.text.TextUtils
 import android.text.TextWatcher
 import android.util.Log
-import android.widget.EditText
+import android.view.inputmethod.BaseInputConnection
 import com.pkkulhari.notebook.core.Applied
 import com.pkkulhari.notebook.core.CoreException
+import com.pkkulhari.notebook.core.ListEnter
 import com.pkkulhari.notebook.core.TextEdit
+import com.pkkulhari.notebook.core.listEnter
 
 /**
- * Keeps an [EditText] and the open note's draft identical. Typing is copied
- * into the draft as it happens; the draft's undos and imported changes are
- * written into the text. Everything runs on the main thread.
+ * Keeps a [NoteEditText] and the open note's draft identical. Typing is
+ * copied into the draft as it happens; the draft's undos and imported changes
+ * are written into the text. Everything runs on the main thread.
  */
-class EditorController(private val store: Store, private val text: EditText) : TextWatcher {
+class EditorController(private val store: Store, private val text: NoteEditText) : TextWatcher {
     /** The note being edited, or null while the text isn't a draft's. */
     var id: String? = null
         private set
+
+    val styler = MarkdownStyler(text)
 
     /** Set while the text changes from the draft, so it isn't copied back. */
     private var fromDraft = false
@@ -27,17 +32,32 @@ class EditorController(private val store: Store, private val text: EditText) : T
 
     init {
         text.addTextChangedListener(this)
+        text.onSelection = { if (id != null) styler.selectionChanged() }
+        text.onUndo = { redo -> if (redo) redo() else undo() }
+        styler.onRestyle = ::restyle
     }
 
     fun open(id: String, body: String, cursor: Int) {
+        val at = cursor.coerceIn(0, body.length)
         this.id = null
-        text.setText(body)
+        text.setText(styler.style(body, at))
         this.id = id
-        text.setSelection(cursor.coerceIn(0, text.length()))
+        text.setSelection(at)
+    }
+
+    /** Sets the same text again with all its styling, keeping the selection. */
+    private fun restyle() {
+        val id = id ?: return
+        val (start, end) = text.selectionStart to text.selectionEnd
+        this.id = null
+        text.setText(styler.style(text.text.toString(), start))
+        this.id = id
+        text.setSelection(start.coerceIn(0, text.length()), end.coerceIn(0, text.length()))
     }
 
     fun close() {
         id = null
+        styler.closed()
     }
 
     override fun beforeTextChanged(s: CharSequence, start: Int, count: Int, after: Int) {}
@@ -55,10 +75,35 @@ class EditorController(private val store: Store, private val text: EditText) : T
             store.reload(id)
             return
         }
+        styler.changed(start)
         schedule(store.core.tick())
+        if (before == 0 && count == 1 && s[start] == '\n') {
+            // After the watcher returns, so the edit goes through it like typing.
+            handler.post { continueList(id, start) }
+        }
     }
 
     override fun afterTextChanged(s: Editable) {}
+
+    /**
+     * Enter at the end of a list item starts the next one; on an empty item
+     * it ends the list instead. `newline` is where the typed `\n` is.
+     */
+    private fun continueList(id: String, newline: Int) {
+        val editable = text.text
+        if (id != this.id || newline >= editable.length || editable[newline] != '\n') return
+        if (styler.inCodeBlock(newline)) return
+        val lineStart = if (newline == 0) 0 else TextUtils.lastIndexOf(editable, '\n', newline - 1) + 1
+        when (val enter = listEnter(editable.substring(lineStart, newline))) {
+            is ListEnter.Continue -> if (newline - lineStart >= enter.marker) {
+                val next = enter.next.removePrefix("\n")
+                editable.insert(newline + 1, next)
+                text.setSelection(newline + 1 + next.length)
+            }
+            is ListEnter.End -> editable.delete(lineStart, newline + 1)
+            null -> {}
+        }
+    }
 
     /** Asks the core to save when it says the next save is due. */
     private fun schedule(wait: Long) {
@@ -68,7 +113,7 @@ class EditorController(private val store: Store, private val text: EditText) : T
 
     /** Writes the draft's changes into the text. Returns where an undo leaves the cursor. */
     fun apply(applied: Applied): Int? {
-        if (applied.edits.isEmpty()) return null
+        val first = applied.edits.firstOrNull() ?: return null
         val editable = text.text
         fromDraft = true
         try {
@@ -81,6 +126,12 @@ class EditorController(private val store: Store, private val text: EditText) : T
         } finally {
             fromDraft = false
         }
+        styler.changed(
+            when (first) {
+                is TextEdit.Insert -> first.at
+                is TextEdit.Delete -> first.at
+            },
+        )
         return applied.cursor
     }
 
@@ -91,7 +142,12 @@ class EditorController(private val store: Store, private val text: EditText) : T
     private fun undoOrRedo(undo: Boolean) {
         val id = id ?: return
         val applied = (if (undo) store.core.undo(id) else store.core.redo(id)) ?: return
-        apply(applied)?.let { text.setSelection(it.coerceIn(0, text.length())) }
+        // The keyboard's composing word is gone or changed; let it start over.
+        BaseInputConnection.removeComposingSpans(text.text)
+        apply(applied)?.let { cursor ->
+            text.setSelection(cursor.coerceIn(0, text.length()))
+            text.bringPointIntoView(text.selectionStart)
+        }
         // An undo is an edit, and needs saving like one.
         schedule(store.core.tick())
     }

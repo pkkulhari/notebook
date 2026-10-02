@@ -1,6 +1,9 @@
 package com.pkkulhari.notebook
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,6 +17,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ListView
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.window.OnBackInvokedCallback
 import android.window.OnBackInvokedDispatcher
@@ -34,7 +38,8 @@ class MainActivity : Activity(), Store.Listener {
     private lateinit var undo: ImageButton
     private lateinit var redo: ImageButton
     private lateinit var trash: ImageButton
-    private lateinit var text: EditText
+    private lateinit var openLink: ImageButton
+    private lateinit var text: NoteEditText
     private lateinit var problem: View
     private lateinit var problemText: TextView
     private lateinit var problemAction: Button
@@ -61,6 +66,7 @@ class MainActivity : Activity(), Store.Listener {
         undo = findViewById(R.id.undo)
         redo = findViewById(R.id.redo)
         trash = findViewById(R.id.trash)
+        openLink = findViewById(R.id.open_link)
         text = findViewById(R.id.text)
         problem = findViewById(R.id.problem)
         problemText = findViewById(R.id.problem_text)
@@ -87,6 +93,12 @@ class MainActivity : Activity(), Store.Listener {
         undo.setOnClickListener { editor.undo() }
         redo.setOnClickListener { editor.redo() }
         trash.setOnClickListener { store.trashOrRestore() }
+        findViewById<View>(R.id.more).setOnClickListener { showMore(it) }
+        editor.styler.onLink = { url ->
+            openLink.visibility = if (url == null) View.GONE else View.VISIBLE
+            openLink.tag = url
+        }
+        openLink.setOnClickListener { (it.tag as? String)?.let(::open) }
         problemAction.setOnClickListener {
             if (store.problem?.retryable == true) store.retry() else store.dismissProblem()
         }
@@ -191,6 +203,23 @@ class MainActivity : Activity(), Store.Listener {
 
     override fun syncChanged() {}
 
+    /** Links are opened deliberately, from the top bar; a tap only places the cursor. */
+    private fun open(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            // Nothing on this device opens it.
+        }
+    }
+
+    private fun showMore(anchor: View) {
+        // Words as the desktop counts them: runs of non-whitespace.
+        val words = text.text.split(WHITESPACE).count { it.isNotEmpty() }
+        PopupMenu(this, anchor).apply {
+            menu.add(resources.getQuantityString(R.plurals.words, words, words)).isEnabled = false
+        }.show()
+    }
+
     /** Ctrl+Z and Ctrl+Shift+Z undo the draft's edits, not the text widget's own history. */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (event.action == KeyEvent.ACTION_DOWN && event.isCtrlPressed && editorScreen.visibility == View.VISIBLE) {
@@ -209,5 +238,6 @@ class MainActivity : Activity(), Store.Listener {
 
     companion object {
         private const val SEARCH_DELAY_MS = 150L
+        private val WHITESPACE = Regex("\\s+")
     }
 }

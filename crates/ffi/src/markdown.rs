@@ -65,6 +65,8 @@ pub struct StyledRange {
 #[derive(uniffi::Object)]
 pub struct MarkdownDocument {
     document: markdown::Document,
+    /// Where each `\n` is, in UTF-16 units.
+    line_breaks: Vec<i32>,
 }
 
 /// Parses a note's text. Call it off the main thread for long notes.
@@ -72,6 +74,12 @@ pub struct MarkdownDocument {
 pub fn parse_markdown(text: String) -> Arc<MarkdownDocument> {
     Arc::new(MarkdownDocument {
         document: markdown::parse(&text, Units::Utf16),
+        line_breaks: text
+            .encode_utf16()
+            .enumerate()
+            .filter(|(_, unit)| *unit == u16::from(b'\n'))
+            .map(|(at, _)| at as i32)
+            .collect(),
     })
 }
 
@@ -96,14 +104,45 @@ impl MarkdownDocument {
         self.document.list_markers.iter().map(Into::into).collect()
     }
 
-    /// The Markdown syntax to hide, leaving visible the blocks the selection
-    /// from `start` to `end` touches.
-    pub fn hidden_outside(&self, start: i32, end: i32) -> Vec<TextRange> {
+    /// The blocks the selection from `start` to `end` touches, whose syntax
+    /// shows. While they stay the same, the hidden syntax does too.
+    pub fn active_blocks(&self, start: i32, end: i32) -> Vec<TextRange> {
         self.document
-            .hidden_outside(start..end)
+            .visible_blocks(start..end)
             .iter()
             .map(Into::into)
             .collect()
+    }
+
+    /// The Markdown syntax to hide, leaving visible the blocks the selection
+    /// from `start` to `end` touches. No range contains a line break: an
+    /// Android `ReplacementSpan` can't cross one, so a setext heading's
+    /// underline is hidden but its line stays.
+    pub fn hidden_outside(&self, start: i32, end: i32) -> Vec<TextRange> {
+        let mut ranges = vec![];
+        for hidden in self.document.hidden_outside(start..end) {
+            let first = self.line_breaks.partition_point(|&at| at < hidden.start);
+            let mut from = hidden.start;
+            for &at in self.line_breaks[first..]
+                .iter()
+                .take_while(|&&at| at < hidden.end)
+            {
+                if at > from {
+                    ranges.push(TextRange {
+                        start: from,
+                        end: at,
+                    });
+                }
+                from = at + 1;
+            }
+            if hidden.end > from {
+                ranges.push(TextRange {
+                    start: from,
+                    end: hidden.end,
+                });
+            }
+        }
+        ranges
     }
 
     /// The link at `position`, if it's one the app may open: http, https or

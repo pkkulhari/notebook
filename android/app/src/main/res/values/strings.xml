@@ -28,5 +28,11 @@
     <string name="restore">Restore note</string>
     <string name="retry">Retry</string>
     <string name="dismiss">Dismiss</string>
+    <string name="open_link">Open link</string>
+    <string name="more">More options</string>
+    <plurals name="words">
+        <item quantity="one">%d word</item>
+        <item quantity="other">%d words</item>
+    </plurals>
     <string name="problem">Could not save or load: %1$s. Your text is kept on this device.</string>
 </resources>

@@ -1,6 +1,6 @@
 package com.pkkulhari.notebook
 
-import android.widget.EditText
+
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pkkulhari.notebook.core.Filter
 import java.io.File
@@ -41,7 +41,7 @@ class StoreTest {
 
     /** Writes a note the way a person does: new note, type, back. */
     private fun write(store: Store, view: Recorder, body: String): String {
-        val text = onMain { EditText(context) }
+        val text = onMain { NoteEditText(context, null) }
         onMain { store.newNote() }
         val id = onMain { view.opened!!.id }
         onMain {
@@ -60,7 +60,7 @@ class StoreTest {
         // A fresh database opens its first note for writing.
         waitUntil("the editor") { view.opened != null }
         val id = onMain { view.opened!!.id }
-        val text = onMain { EditText(context) }
+        val text = onMain { NoteEditText(context, null) }
         onMain {
             EditorController(first, text).open(id, view.text, 0)
             text.text.append("Written on a phone 🌿")

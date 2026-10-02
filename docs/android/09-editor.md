@@ -1,6 +1,6 @@
 # 9. Markdown editor
 
-**Status:** Not started
+**Status:** Done (tested on an x86_64 emulator; manual keyboard checks on a phone are still to do)
 **Needs:** step 8
 
 ## Goal
@@ -111,4 +111,25 @@ Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` i
 
 ## Notes
 
-_Anything surprising goes here._
+- **The editor opts out of autofill and content capture.** This was the biggest finding of the step.
+  - `TextView` sends its whole text to the autofill service after every change, parcelled with its spans, even with `importantForAutofill="no"` in the layout.
+  - On a 50,000-character note that was a 252 KB binder transaction per keystroke: about 75 ms each, and eventually a `TransactionTooLargeException` crash.
+  - It also sends note text to other apps. `NoteEditText` now returns `AUTOFILL_TYPE_NONE` and sets `importantForContentCapture` to no.
+- **Styling a whole note happens off screen.** Each `setSpan` on text with a layout attached reflows it, so styling a 50,000-character note span by span took 4.5 s.
+  - `MarkdownStyler.style` parses synchronously and builds the spans on a `SpannableString` with no layout attached. Unlike `SpannableStringBuilder`, it doesn't keep spans sorted as they're added.
+  - `setText` then copies the spans in once.
+  - Later parses change only the spans that differ. When a parse would add more than 300 spans, as after a long paste, the editor sets its text again the same way.
+- **Hidden syntax is recomputed only when the active blocks change.** A new FFI call, `active_blocks`, makes this possible, so moving the cursor within a block costs nothing.
+- **Hidden ranges never contain a line break.** The FFI splits them, with a Rust test. The only case was a setext heading's underline (`===\n`). On Android its line stays as an empty line, where the desktop hides it entirely.
+- **Trashed notes stay non-focusable**, as in step 8, rather than using `keyListener = null` plus `setTextIsSelectable(true)`. Switching back means restoring the key listener, movement method and input type by hand, which is fragile. They can't be selected or copied until restored.
+- **Measured on the emulator with debug builds** (unoptimized Rust and ART), on a 50,000-character list note:
+  - parse: 12–17 ms on the background thread
+  - keystroke: 9 ms median, 12 ms maximum
+  - a pasted 50k note fully styled: about 1 s
+  - opening one: about 0.9 s (0.38 s to style, 0.55 s for `setText`), over the 100 ms budget. Step 11 measures release builds on a phone.
+- **Tests (`EditorTest`):**
+  - Keyboard input through an `InputConnection`: composition, CJK, emoji, and deletes across surrogate pairs.
+  - A change before the cursor, list continuation and ending (including a hardware Enter), no continuation inside code blocks, syntax per active block, copy and paste, and the 50k timing.
+  - The tests detach the real keyboard first. An attached IME finishes compositions it didn't start, which made the first version of the composition test fail.
+  - Doc test 2 applies an `Applied` through the store's listener, because instrumented tests have no second device. The core's side of a remote edit, and doc test 3, are covered by the Rust tests.
+  - Test 7, with Gboard and a second keyboard on a phone, is still a manual check.

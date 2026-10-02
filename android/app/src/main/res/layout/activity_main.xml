@@ -145,6 +145,13 @@
                     android:layout_weight="1" />
 
                 <ImageButton
+                    android:id="@+id/open_link"
+                    style="@style/ToolbarButton"
+                    android:contentDescription="@string/open_link"
+                    android:src="@drawable/ic_open_link"
+                    android:visibility="gone" />
+
+                <ImageButton
                     android:id="@+id/undo"
                     style="@style/ToolbarButton"
                     android:contentDescription="@string/undo"
@@ -161,9 +168,15 @@
                     style="@style/ToolbarButton"
                     android:contentDescription="@string/move_to_trash"
                     android:src="@drawable/ic_trash" />
+
+                <ImageButton
+                    android:id="@+id/more"
+                    style="@style/ToolbarButton"
+                    android:contentDescription="@string/more"
+                    android:src="@drawable/ic_more" />
             </LinearLayout>
 
-            <EditText
+            <com.pkkulhari.notebook.NoteEditText
                 android:id="@+id/text"
                 android:layout_width="match_parent"
                 android:layout_height="0dp"
@@ -172,7 +185,7 @@
                 android:gravity="top|start"
                 android:hint="@string/start_writing"
                 android:importantForAutofill="no"
-                android:inputType="textMultiLine|textCapSentences"
+                android:inputType="textMultiLine|textCapSentences|textAutoCorrect"
                 android:lineSpacingMultiplier="1.25"
                 android:paddingHorizontal="20dp"
                 android:paddingTop="8dp"
