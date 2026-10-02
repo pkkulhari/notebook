@@ -1,6 +1,6 @@
 # 6. FFI crate
 
-**Status:** Not started
+**Status:** Done
 **Needs:** steps 3, 4 and 5
 **Adds:** `crates/ffi` (package `notebook-ffi`)
 
@@ -184,4 +184,17 @@ Add an optional `logcat` feature, on only in debug builds. It installs a `tracin
 
 ## Notes
 
-_Anything surprising goes here._
+- **Layout:** `src/lib.rs` (`Core` and the event thread), `src/types.rs` (records, enums and conversions), `src/markdown.rs` (`MarkdownDocument`, `parse_markdown`, `list_enter`), and `src/android.rs` (the JNI `install` and the optional `logcat` logging, copied from the spike).
+- **The API grew a little beyond the sketch:**
+  - `draft_text(id)`, to show a cached draft again without reloading it.
+  - `show_draft(id)`, which records that a draft is showing so `trim_drafts` closes it last.
+  - `has_failures()`, to hide the error bar once retries succeed.
+  - `trim_drafts` returns the IDs it closed.
+  - `Ready` carries the saved `selected_note` and `cursor`.
+- **`create_note` puts the note in the default notebook**, using the `default_notebook_id` from `Ready`. Storage puts new notes there anyway.
+- **`link_at` returns only http, https and mailto links**, the same rule as the desktop, so Kotlin has nothing to filter.
+- **Error operations** are "open", "list", "load", "create", "save", "change", "preferences", "sync" and "flush". Failures of saves, creates, initialization and preferences are retryable, as on the desktop.
+- **Bindings:** the Kotlin file has about 5,100 lines. `CoreError` becomes `CoreException`, and records become `data class`es.
+- **Kotlin's listener must catch its own exceptions.** An exception thrown from `on_event` reaches Rust as a callback error, on the event thread.
+- **Android build:** the library builds for arm64 with and without `logcat`, and exports `Java_com_pkkulhari_notebook_AndroidContext_install` plus the UniFFI functions.
+- **Tests (`crates/ffi/tests/core.rs`):** the six planned ones, plus a failed save that is retried along with later edits (using a SQLite trigger, as the GTK test does), and the Markdown functions in UTF-16.

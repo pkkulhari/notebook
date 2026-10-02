@@ -1,0 +1,40 @@
+[package]
+name = "notebook-ffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The Notebook core for the Android app, through UniFFI"
+license.workspace = true
+publish = false
+
+[lib]
+name = "notebook_ffi"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Pins the bindings generator to the library's UniFFI version.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[features]
+# Rust logs and panics in logcat, for debug builds.
+logcat = ["dep:paranoid-android", "dep:tracing", "dep:tracing-subscriber"]
+
+[dependencies]
+notebook-core.workspace = true
+uniffi = "=0.32.2"
+
+# The bindings generator (clap and friends) is only built for the host.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+uniffi = { version = "=0.32.2", features = ["cli"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+iroh = "1.2"
+jni = { version = "0.22", default-features = false }
+paranoid-android = { version = "0.2", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry"], optional = true }
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true

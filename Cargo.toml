@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/gtk"]
+members = ["crates/core", "crates/gtk", "crates/ffi"]
 default-members = ["crates/core", "crates/gtk"]
 
 [workspace.package]
