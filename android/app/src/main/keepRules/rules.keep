@@ -1,0 +1,9 @@
+# UniFFI's bindings call into Rust through JNA, which finds classes and
+# methods by reflection.
+-keep class com.sun.jna.** { *; }
+-keep class * implements com.sun.jna.** { *; }
+-keep class com.pkkulhari.notebook.core.** { *; }
+# Its native method is looked up by name from Rust.
+-keep class com.pkkulhari.notebook.AndroidContext { *; }
+# JNA's desktop window helpers refer to AWT, which Android doesn't have.
+-dontwarn java.awt.**

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Everything in filesDir is backed up, notebook.db included. sync.json is in
+     noBackupFilesDir, which never is, so a restore can't give two devices the
+     same sync identity. -->
+<full-backup-content />
