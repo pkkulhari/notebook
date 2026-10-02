@@ -1,5 +1,5 @@
 use iroh::EndpointAddr;
-use notebook::{
+use notebook_core::{
     model::*,
     storage::{Command, Event, Repository, spawn_worker},
     sync::{self, Control, Options, Pairing, Status, SyncHandle},

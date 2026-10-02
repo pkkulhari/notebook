@@ -39,7 +39,7 @@ With the build dependencies above installed, generate a release package:
 
 ```sh
 cargo install cargo-deb --locked
-cargo deb --locked
+cargo deb -p notebook --locked
 ```
 
 The `.deb` is written to `target/debian/` and includes a desktop application launcher. Install it with:

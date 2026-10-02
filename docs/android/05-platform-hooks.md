@@ -10,7 +10,7 @@
 
 ## 1. Linux paths move to the gtk crate
 
-`storage::data_path()`, `sync::config_path()` and `storage::xdg_path` (`src/storage.rs:969`, `src/sync.rs:112`) encode XDG conventions. Move them to `crates/gtk`, and update `examples/seed_demo.rs` to take the path from its argument or build it the same way. Core then never guesses where files live.
+`storage::data_path()`, `sync::config_path()` and `storage::xdg_path` (`crates/core/src/storage.rs:969`, `crates/core/src/sync.rs:112`) encode XDG conventions. Move them to `crates/gtk`, and update `crates/core/examples/seed_demo.rs` to take the path from its argument or build it the same way. Core then never guesses where files live.
 
 Android passes:
 
@@ -21,7 +21,7 @@ Android passes:
 
 ## 2. Device name comes from the caller
 
-`Config::load` (`src/sync.rs:68`) falls back to `/proc/sys/kernel/hostname`, which says `localhost` on Android. Add a `default_device_name: String` argument to `sync::spawn`, used only when the config has no name yet:
+`Config::load` (`crates/core/src/sync.rs:68`) falls back to `/proc/sys/kernel/hostname`, which says `localhost` on Android. Add a `default_device_name: String` argument to `sync::spawn`, used only when the config has no name yet:
 
 - GTK passes the hostname, keeping today's logic in the gtk crate.
 - Android passes `Settings.Global.DEVICE_NAME`, falling back to `Build.MODEL`.
@@ -72,7 +72,7 @@ This calls `node.endpoint.network_change().await`, then `self.tick()` to redial 
 
 ## 6. Replace a stale session when a device reconnects
 
-When one side's process restarts, the other side keeps its dead session until QUIC's idle timeout of about 30 s. Meanwhile `Sync::adopt` (`src/sync.rs:730`) rejects the restarted device's new connection as a duplicate. In the spike, reopening the app left it disconnected for 19–30 s (spike Finding 10), and Android restarts app processes all the time.
+When one side's process restarts, the other side keeps its dead session until QUIC's idle timeout of about 30 s. Meanwhile `Sync::adopt` (`crates/core/src/sync.rs:730`) rejects the restarted device's new connection as a duplicate. In the spike, reopening the app left it disconnected for 19–30 s (spike Finding 10), and Android restarts app processes all the time.
 
 Change `adopt` so a new connection can replace a session that is no longer fresh:
 
@@ -89,7 +89,7 @@ Dropping the old `Session` aborts its task. Nothing is lost, because the new ses
 
 ## Tests
 
-1. `tests/network.rs`-style test with two nodes in one process: suspend A, edit on B, resume A. Both converge, and A's status shows `suspended` during the pause.
+1. `crates/core/tests/network.rs`-style test with two nodes in one process: suspend A, edit on B, resume A. Both converge, and A's status shows `suspended` during the pause.
 2. `SetRelay` while suspended saves the config but doesn't bind. After resume, the node uses the new relay.
 3. `NetworkChanged` while connected leaves the session up. While disconnected, it triggers a dial.
 4. The status sink receives a status on startup and after each change, the same statuses the channel used to carry.

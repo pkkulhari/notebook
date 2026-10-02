@@ -12,7 +12,7 @@ Every position in the app is a count of something, and the platforms count diffe
 | --- | --- |
 | GTK `TextIter` offsets, cursor in `Preferences` | characters (Unicode scalar values) |
 | Loro `insert`/`delete`, and text event deltas | characters |
-| `markdown::parse` spans, hidden ranges, blocks, markers and links | characters (the `offsets` table in `src/markdown.rs:45`) |
+| `markdown::parse` spans, hidden ranges, blocks, markers and links | characters (the `offsets` table in `crates/core/src/markdown.rs:45`) |
 | `markdown::list_enter`'s `marker` | characters |
 | Android `Editable`, `TextWatcher`, selection, `Layout` | **UTF-16 units** |
 

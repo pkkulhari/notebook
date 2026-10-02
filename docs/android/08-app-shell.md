@@ -30,7 +30,7 @@ app/src/main/java/com/pkkulhari/notebook/
   Dates.kt              list dates, matching note_date() in the desktop app
 ```
 
-`Store` mirrors the desktop's `State` (`src/ui.rs:51`):
+`Store` mirrors the desktop's `State` (`crates/gtk/src/ui.rs:51`):
 
 - `defaultNotebookId`, `notebooks`, `notes` and `counts`
 - `filter` and `query`
@@ -65,7 +65,7 @@ Back navigation goes from the editor to the list. Use `OnBackInvokedCallback` (A
 
 ## Event handling
 
-These mirror `Ui::handle` in `src/ui.rs:1612`.
+These mirror `Ui::handle` in `crates/gtk/src/ui.rs:1612`.
 
 | Event | What happens |
 | --- | --- |

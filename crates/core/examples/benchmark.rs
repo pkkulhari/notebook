@@ -1,5 +1,5 @@
 //! Run with `cargo run --release --example benchmark`.
-use notebook::{markdown, model::*, storage::Repository};
+use notebook_core::{markdown, model::*, storage::Repository};
 use std::time::Instant;
 
 fn main() {

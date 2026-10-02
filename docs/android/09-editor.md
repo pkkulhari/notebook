@@ -37,7 +37,7 @@ This refines step 8's watcher.
 
 ### Parsing
 
-- Parse on one background thread with `parse_markdown(text)`, 80 ms after the last change. The desktop uses the same delay (`parse_due` in `src/ui.rs`).
+- Parse on one background thread with `parse_markdown(text)`, 80 ms after the last change. The desktop uses the same delay (`parse_due` in `crates/gtk/src/ui.rs`).
 - Coalesce requests: while a parse runs, keep only the newest one.
 - Tag each request with a generation number, and apply a result only if the text hasn't changed since.
 - Until the new result arrives, remove the hidden spans on the line being edited, as `text_changed` does on the desktop, so syntax doesn't flicker.
@@ -62,7 +62,7 @@ Every span class implements a marker interface, `MdSpan`, so clearing styles rem
 | list markers | hanging indent to the marker width | `LeadingMarginSpan.Standard(0, markerWidth)`, with the width from `Paint.measureText` on the marker text |
 | hidden syntax | `invisible` | `HiddenSpan`: a `ReplacementSpan` with zero width that draws nothing |
 
-- Diff the new spans against the applied ones, and add or remove only what changed. The desktop does this for hidden ranges (`update_hidden`, `src/ui.rs:1492`).
+- Diff the new spans against the applied ones, and add or remove only what changed. The desktop does this for hidden ranges (`update_hidden`, `crates/gtk/src/ui.rs:1492`).
 - Removing and re-adding every span forces a full `DynamicLayout` reflow, which is visible on long notes.
 
 ### Hidden syntax
@@ -84,7 +84,7 @@ Every span class implements a marker interface, `MdSpan`, so clearing styles rem
 
 A tap places the cursor, because that's what editing needs. When the cursor sits inside a link (`document.linkAt`), show an **Open link** action in the top bar.
 
-- Open `http`, `https` and `mailto` targets with `Intent.ACTION_VIEW`. These are the same schemes the desktop allows (`src/ui.rs:730`).
+- Open `http`, `https` and `mailto` targets with `Intent.ACTION_VIEW`. These are the same schemes the desktop allows (`crates/gtk/src/ui.rs:730`).
 - Ignore any other scheme.
 
 ## Word count
@@ -93,7 +93,7 @@ Show it in the editor's overflow menu. Count words split on whitespace, the same
 
 ## Performance checks
 
-Use a 50,000-character note: `LINE_DIFF_CHARS` in `src/storage.rs` is where the core switches to line diffs.
+Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` is where the core switches to line diffs.
 
 - Typing stays smooth: no dropped frames in the GPU profiler while typing steadily.
 - Parse plus span diff finishes within one frame after the 80 ms delay.

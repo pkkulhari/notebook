@@ -1,6 +1,6 @@
 # 2. Split the crate into a workspace
 
-**Status:** Not started
+**Status:** Done
 **Needs:** nothing
 **Behaviour change:** none
 
@@ -57,7 +57,7 @@ android/                      Gradle project
    ```
 3. Write `crates/core/Cargo.toml` with every current dependency except `gtk`, plus `tempfile` as a dev-dependency.
 4. Write `crates/gtk/Cargo.toml`:
-   - Package `notebook`, with dependencies on `notebook-core` (by path), `gtk` and `loro`. `ui.rs` uses `LoroDoc` and `UndoManager` directly until step 3 moves them out.
+   - Package `notebook`, with dependencies on `notebook-core` (by path), `gtk`, `loro` and `uuid`. `ui.rs` uses `LoroDoc` and `UndoManager` directly until step 3 moves them out, and `uuid` to create notebook IDs. Its unit tests also need `tempfile` and `rusqlite` as dev-dependencies.
    - Move `description` and `[package.metadata.deb]` here.
    - cargo-deb resolves asset paths relative to the package directory. It maps `target/release/…` to the real target directory, so that entry can stay as it is. The others become `../../README.md` and `../../data/io.github.pkkulhari.Notebook.desktop`.
 5. Replace `notebook::` with `notebook_core::` in `ui.rs`, the tests and the examples.
@@ -68,10 +68,19 @@ android/                      Gradle project
 
 - `cargo test` at the root runs the same tests as before, and they pass.
 - `cargo tree -p notebook-core -e normal | grep -i gtk` prints nothing.
-- `cargo ndk -t arm64-v8a build -p notebook-core` succeeds, using the toolchain from step 1.
+- `cargo ndk -t arm64-v8a -P 35 build -p notebook-core` succeeds, using the toolchain from step 1.
 - `cargo deb -p notebook --locked` builds a package with the same files as before. Compare with `dpkg -c`.
 - `./target/release/notebook` opens an existing database without changes.
 
 ## Notes
 
-_Anything surprising goes here._
+- **Tests:** `cargo test` ran the same targets before and after, with the same counts: 33 passed and 4 ignored. Three of the ignored tests are in `tests/network.rs` (they need multicast or n0's relays), and one is the GTK `desktop_workflow` test.
+- **The GTK test** still passes when run by hand. `session-bus.conf` gives it an isolated bus without desktop services:
+  ```sh
+  dbus-run-session --config-file=crates/gtk/tests/session-bus.conf -- xvfb-run -a cargo test -p notebook -- --ignored
+  ```
+- **`.deb`:** cargo-deb 3.8.0 built a package with the same files, modes and control fields as before, including `Depends`. The README, `.desktop` file and copyright are byte-identical. Only the binary differs, by 64 bytes, because of the new crate name.
+- **Root commands:** `cargo run --release` and `cargo run --example seed_demo` still work from the root. Each target name is unique among the default members, so Cargo can pick it without `-p`.
+- **Existing data:** a copy of a database written by the pre-split build opened with no errors, and its notes and notebooks were unchanged.
+- **`Cargo.lock`:** the split only added the `notebook-core` entry and changed `notebook`'s dependency list. No versions moved.
+- **Resolver:** a virtual manifest has no edition, so `resolver = "3"` must be set explicitly. The single package already used resolver 3 through edition 2024, so dependency resolution is unchanged.

@@ -1,0 +1,29 @@
+[package]
+name = "notebook"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A quiet, native Linux notebook"
+license.workspace = true
+
+[package.metadata.deb]
+maintainer = "pkkulhari"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+extended-description = "A native GTK4 note-taking app with Markdown editing, notebooks, search, automatic saving, local SQLite storage, and peer-to-peer sync between your devices."
+assets = [
+    ["target/release/notebook", "usr/bin/", "755"],
+    ["../../README.md", "usr/share/doc/notebook/README.md", "644"],
+    ["../../data/io.github.pkkulhari.Notebook.desktop", "usr/share/applications/", "644"],
+]
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+loro.workspace = true
+notebook-core.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rusqlite.workspace = true
+tempfile.workspace = true

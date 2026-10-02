@@ -1,6 +1,6 @@
 //! Replace a closed Notebook database with realistic UI sample data.
 //! cargo run --release --example seed_demo -- --reset [database-path]
-use notebook::{
+use notebook_core::{
     model::*,
     storage::{self, Mutation, Repository, Result},
 };

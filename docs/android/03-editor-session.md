@@ -10,7 +10,7 @@ The GTK UI owns a copy of each open note as a CRDT document, and the code around
 
 ## What moves
 
-Line numbers are from `src/ui.rs` before step 2.
+Line numbers are from `crates/gtk/src/ui.rs` as of step 2.
 
 | Behaviour | Now | Moves to |
 | --- | --- | --- |
@@ -117,7 +117,7 @@ Notes on the API:
 
 ## Tests (in `crates/core`)
 
-Use a real `Repository` in a temp directory, as `tests/storage.rs` does.
+Use a real `Repository` in a temp directory, as `crates/core/tests/storage.rs` does.
 
 1. Type, then call `due` after a 300 ms pause. `Repository::edit` with the resulting command stores the same text.
 2. Type continuously with gaps under 300 ms. A save still falls due every 2 s.

@@ -63,7 +63,7 @@ Run before each release:
 
 - at least one physical arm64 phone on the oldest supported Android version, and one on the newest
 - the x86_64 emulator
-- a database seeded with `examples/seed_demo.rs`, plus a 50,000-character note
+- a database seeded with `crates/core/examples/seed_demo.rs`, plus a 50,000-character note
 - steps 8 to 10's instrumented tests, and step 10's manual interop list with the current Linux release
 
 ## Docs

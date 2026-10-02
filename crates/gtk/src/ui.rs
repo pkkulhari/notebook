@@ -1,6 +1,6 @@
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use loro::{ContainerTrait, ExportMode, LoroDoc, LoroText, TextDelta, UndoManager, VersionVector};
-use notebook::{
+use notebook_core::{
     crdt,
     markdown::{self, Document},
     model::*,

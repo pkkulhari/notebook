@@ -1,4 +1,4 @@
-use notebook::{
+use notebook_core::{
     model::*,
     storage::{Command, Event, Mutation, Repository, spawn_worker},
 };

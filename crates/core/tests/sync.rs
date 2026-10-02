@@ -1,4 +1,4 @@
-use notebook::{
+use notebook_core::{
     crdt::{self, Kind},
     model::*,
     storage::{Mutation, RemoteDoc, Repository},

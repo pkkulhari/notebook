@@ -9,7 +9,7 @@ A phone pairs with the Linux app, or with another phone, using the same six-digi
 
 ## Screen
 
-Build a sync screen (or bottom sheet) that mirrors the desktop dialog (`show_sync_dialog`, `src/ui.rs:2032`) and uses the same wording:
+Build a sync screen (or bottom sheet) that mirrors the desktop dialog (`show_sync_dialog`, `crates/gtk/src/ui.rs:2032`) and uses the same wording:
 
 - **Sync with your other devices**: an on/off switch, with the hint "Notes travel directly between your paired devices, encrypted. Nothing leaves this network unless you add a relay."
 - **This device's name**: sends `SetDeviceName` when editing finishes.

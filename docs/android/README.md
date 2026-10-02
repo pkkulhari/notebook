@@ -39,7 +39,7 @@ This folder splits the work into steps. Each step lands on the `android-app` bra
 | Decision | Why |
 | --- | --- |
 | Cargo workspace with `crates/core`, `crates/gtk` and `crates/ffi` | `gtk4` is a dependency of the whole package today, so nothing builds for Android until it is split out. |
-| The editor's document logic moves into core as `editor::Drafts` | `Draft` in `src/ui.rs` holds merge-critical code: the editor's own `LoroDoc`, undo of this device's edits only, and acked/in-flight save versions. Keeping a second copy in Kotlin would drift. |
+| The editor's document logic moves into core as `editor::Drafts` | `Draft` in `crates/gtk/src/ui.rs` holds merge-critical code: the editor's own `LoroDoc`, undo of this device's edits only, and acked/in-flight save versions. Keeping a second copy in Kotlin would drift. |
 | Positions cross the FFI boundary in UTF-16 units | Android's `Editable` counts UTF-16 units, while GTK and Loro count characters. Core converts, so Kotlin never counts characters. |
 | UniFFI generates the bindings | It generates Kotlin code with objects, records, enums and callback interfaces. Each call costs microseconds, which doesn't matter at typing speed. |
 | Framework Views, not Compose; the editor is an `EditText` with spans | This gives the smallest APK and fastest cold start. `EditText` spans map directly onto GTK text tags. |
@@ -71,4 +71,4 @@ This folder splits the work into steps. Each step lands on the `android-app` bra
 - All work goes on `android-app`, branched from `master`. Rebase on `master` if desktop fixes land there in the meantime.
 - Every commit leaves `cargo test` passing and the desktop app working.
 - Each doc starts with a **Status** line. Update it as work lands, and write down anything surprising in the doc's **Notes** section, so later steps can use it.
-- Code paths in these docs refer to the layout before step 2 (`src/ui.rs`) unless a doc says otherwise.
+- Code paths in these docs use the workspace layout from step 2, such as `crates/core/src/sync.rs` and `crates/gtk/src/ui.rs`. Doc 01 is the exception: it describes the spike branch, which still has the old layout.

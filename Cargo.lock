@@ -2741,8 +2741,19 @@ dependencies = [
 name = "notebook"
 version = "0.2.0"
 dependencies = [
- "blake3",
  "gtk4",
+ "loro",
+ "notebook-core",
+ "rusqlite",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "notebook-core"
+version = "0.2.0"
+dependencies = [
+ "blake3",
  "iroh",
  "iroh-mdns-address-lookup",
  "loro",
