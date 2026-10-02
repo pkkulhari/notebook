@@ -52,4 +52,6 @@ class Recorder : Store.Listener {
     override fun problemChanged() {}
 
     override fun syncChanged() {}
+
+    override fun syncScreenChanged() {}
 }

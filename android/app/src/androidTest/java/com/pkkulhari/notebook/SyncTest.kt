@@ -64,6 +64,7 @@ class SyncTest {
 
             onMain { activity.findViewById<Switch>(R.id.sync_enabled).isChecked = false }
             waitUntil("sync to stop") { !store.syncStatus!!.enabled && !store.syncStatus!!.running }
+            onMain { activity.findViewById<View>(R.id.sync_back).performClick() }
         }
     }
 }

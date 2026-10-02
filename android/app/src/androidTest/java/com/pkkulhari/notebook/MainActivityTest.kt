@@ -49,6 +49,20 @@ class MainActivityTest {
         }
     }
 
+    @Test
+    fun theSyncScreenSurvivesRecreation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { it.findViewById<View>(R.id.sync_button).performClick() }
+            scenario.recreate()
+            scenario.onActivity {
+                assertTrue(it.findViewById<View>(R.id.sync_screen).isShown)
+                assertTrue(!it.findViewById<View>(R.id.list_screen).isShown)
+                it.findViewById<View>(R.id.sync_back).performClick()
+                assertTrue(!it.findViewById<View>(R.id.sync_screen).isShown)
+            }
+        }
+    }
+
     private fun assertNewNoteClearsSearch(committed: Boolean) {
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             lateinit var store: Store

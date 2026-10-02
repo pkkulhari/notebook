@@ -78,8 +78,8 @@ class MainActivity : Activity(), Store.Listener {
         syncScreen = findViewById(R.id.sync_screen)
         syncButton = findViewById(R.id.sync_button)
         sync = SyncPanel(syncScreen, store, ::allowLocalNetwork)
-        syncButton.setOnClickListener { showSync(true) }
-        findViewById<View>(R.id.sync_back).setOnClickListener { showSync(false) }
+        syncButton.setOnClickListener { store.showSync(true) }
+        findViewById<View>(R.id.sync_back).setOnClickListener { store.showSync(false) }
 
         editor = EditorController(store, text)
         adapter = NoteListAdapter(layoutInflater)
@@ -172,11 +172,9 @@ class MainActivity : Activity(), Store.Listener {
 
     override fun opened(note: NoteInfo, text: String, cursor: Int, focus: Boolean) {
         editor.open(note.id, text, cursor)
-        listScreen.visibility = View.GONE
         editorScreen.visibility = View.VISIBLE
         activeChanged()
-        syncScreen.visibility = View.GONE
-        updateBack()
+        updateScreens()
         if (focus && !note.deleted) {
             this.text.requestFocus()
             getSystemService(InputMethodManager::class.java).showSoftInput(this.text, 0)
@@ -188,13 +186,12 @@ class MainActivity : Activity(), Store.Listener {
         getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(text.windowToken, 0)
         text.clearFocus()
         editorScreen.visibility = View.GONE
-        listScreen.visibility = View.VISIBLE
-        updateBack()
+        updateScreens()
         listChanged()
     }
 
     private fun goBack() {
-        if (syncScreen.visibility == View.VISIBLE) showSync(false) else store.closeNote()
+        if (store.syncShowing) store.showSync(false) else store.closeNote()
     }
 
     private fun updateBack() {
@@ -207,12 +204,20 @@ class MainActivity : Activity(), Store.Listener {
         backRegistered = wanted
     }
 
-    private fun showSync(show: Boolean) {
-        if (show) store.cancelPendingLoad()
-        syncScreen.visibility = if (show) View.VISIBLE else View.GONE
-        listScreen.visibility = if (show || editorScreen.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        if (show) sync.update() else getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(syncScreen.windowToken, 0)
+    /** Shows the sync screen over the note or the list, as the store says. */
+    private fun updateScreens() {
+        syncScreen.visibility = if (store.syncShowing) View.VISIBLE else View.GONE
+        listScreen.visibility = if (store.syncShowing || editorScreen.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         updateBack()
+    }
+
+    override fun syncScreenChanged() {
+        updateScreens()
+        if (store.syncShowing) {
+            sync.update()
+        } else {
+            getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(syncScreen.windowToken, 0)
+        }
     }
 
     /**
@@ -259,7 +264,7 @@ class MainActivity : Activity(), Store.Listener {
 
     override fun syncChanged() {
         val status = store.syncStatus ?: return
-        if (syncScreen.visibility == View.VISIBLE) sync.update()
+        if (store.syncShowing) sync.update()
         val connected = status.devices.filter { it.connected }.map { it.name }
         syncButton.contentDescription = when {
             status.problem != null -> status.problem
@@ -293,7 +298,7 @@ class MainActivity : Activity(), Store.Listener {
 
     /** Ctrl+Z and Ctrl+Shift+Z undo the draft's edits, not the text widget's own history. */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (event.action == KeyEvent.ACTION_DOWN && event.isCtrlPressed && editorScreen.visibility == View.VISIBLE) {
+        if (event.action == KeyEvent.ACTION_DOWN && event.isCtrlPressed && store.active != null && !store.syncShowing) {
             when {
                 event.keyCode == KeyEvent.KEYCODE_Z && event.isShiftPressed -> return true.also { editor.redo() }
                 event.keyCode == KeyEvent.KEYCODE_Z -> return true.also { editor.undo() }

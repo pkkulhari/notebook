@@ -47,6 +47,9 @@ class Store(
         fun problemChanged()
 
         fun syncChanged()
+
+        /** The sync screen was shown or hidden. */
+        fun syncScreenChanged()
     }
 
     data class Problem(val message: String, val retryable: Boolean)
@@ -79,6 +82,10 @@ class Store(
 
     /** The note in the editor, or null while the list shows. */
     var active: String? = null
+        private set
+
+    /** Whether the sync screen shows, over the note or the list. */
+    var syncShowing = false
         private set
 
     /** Where the cursor was when the app last paused, in UTF-16 units. */
@@ -244,8 +251,15 @@ class Store(
     }
 
     /** Navigation supersedes a load even when it doesn't request another one. */
-    fun cancelPendingLoad() {
+    private fun cancelPendingLoad() {
         loadGeneration += 1
+    }
+
+    fun showSync(show: Boolean) {
+        if (show == syncShowing) return
+        if (show) cancelPendingLoad()
+        syncShowing = show
+        listener?.syncScreenChanged()
     }
 
     fun openNote(id: String) {
@@ -274,6 +288,7 @@ class Store(
 
     private fun show(note: NoteInfo, text: String, cursor: Int, focus: Boolean) {
         active = note.id
+        syncShowing = false
         this.cursor = cursor
         core.showDraft(note.id)
         core.trimDrafts(note.id)
