@@ -86,8 +86,15 @@ class Store(
 
     private val network = NetworkWatch(context) { core.sync(SyncControl.NetworkChanged) }
 
-    /** Whether an activity is showing; sync runs only then. */
+    /** Whether an activity is showing. Sync runs then, and briefly after. */
     private var visible = false
+
+    /** Stops sync networking once the app has stayed in the background. */
+    private val suspend = Runnable {
+        core.sync(SyncControl.Suspend(true))
+        network.stop()
+        network.multicast(false)
+    }
 
     private var listGeneration = 0L
     private var loadGeneration = 0L
@@ -329,24 +336,39 @@ class Store(
 
     fun dismissProblem() = setProblem(null)
 
-    /** Suspend background networking without disabling sync; resume catches up. */
+    /**
+     * Suspends background networking without disabling sync, after a delay
+     * so a rotation or a quick trip to another app keeps the connections.
+     * Resuming catches up.
+     */
     fun foreground(visible: Boolean) {
         if (visible == this.visible) return
         this.visible = visible
         if (visible) {
+            if (main.hasCallbacks(suspend)) {
+                main.removeCallbacks(suspend)
+                return
+            }
             network.start()
             network.multicast(syncStatus?.enabled == true)
             core.sync(SyncControl.Suspend(false))
         } else {
             core.flush()
-            core.sync(SyncControl.Suspend(true))
-            network.stop()
-            network.multicast(false)
+            main.postDelayed(suspend, SUSPEND_DELAY_MS)
         }
     }
 
     fun pause() {
         core.flush()
         core.savePreferences(active, cursor)
+    }
+
+    companion object {
+        /**
+         * How long sync keeps running in the background: long enough for a
+         * rotation or a glance at another app, short because Android may
+         * freeze a backgrounded app at any time.
+         */
+        const val SUSPEND_DELAY_MS = 5_000L
     }
 }

@@ -45,9 +45,19 @@ class SyncTest {
             onMain { activity.findViewById<View>(R.id.cancel_code).performClick() }
             waitUntil("pairing to stop") { store.syncStatus!!.pairing is Pairing.Idle }
 
-            // Leaving the app suspends sync without turning it off.
+            // A quick trip away, like a rotation, keeps sync running.
+            onMain {
+                store.foreground(false)
+                store.foreground(true)
+            }
+            Thread.sleep(Store.SUSPEND_DELAY_MS + 500)
+            assertTrue(onMain { store.syncStatus!!.running && !store.syncStatus!!.suspended })
+
+            // Staying away suspends sync without turning it off.
             onMain { store.foreground(false) }
-            waitUntil("suspension") { store.syncStatus!!.suspended && !store.syncStatus!!.running }
+            waitUntil("suspension", timeoutMs = Store.SUSPEND_DELAY_MS + 10_000) {
+                store.syncStatus!!.suspended && !store.syncStatus!!.running
+            }
             assertTrue(onMain { store.syncStatus!!.enabled })
             onMain { store.foreground(true) }
             waitUntil("sync to resume") { store.syncStatus!!.running && !store.syncStatus!!.suspended }
