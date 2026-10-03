@@ -147,27 +147,20 @@
                     android:textSize="16sp"
                     android:visibility="gone" />
 
-                <Button
+                <ImageButton
                     android:id="@+id/new_note"
-                    android:layout_width="wrap_content"
+                    android:layout_width="56dp"
                     android:layout_height="56dp"
                     android:layout_gravity="bottom|end"
                     android:layout_margin="20dp"
                     android:background="@drawable/fab"
-                    android:drawableStart="@drawable/ic_add"
-                    android:drawablePadding="8dp"
-                    android:drawableTint="@color/on_accent"
+                    android:contentDescription="@string/new_note"
                     android:elevation="6dp"
-                    android:fontFamily="sans-serif-medium"
                     android:outlineAmbientShadowColor="@color/accent"
                     android:outlineSpotShadowColor="@color/accent"
-                    android:paddingStart="16dp"
-                    android:paddingEnd="20dp"
-                    android:stateListAnimator="@null"
-                    android:text="@string/new_note"
-                    android:textAllCaps="false"
-                    android:textColor="@color/on_accent"
-                    android:textSize="15sp" />
+                    android:src="@drawable/ic_add"
+                    android:tint="@color/on_accent"
+                    android:tooltipText="@string/new_note" />
             </FrameLayout>
         </LinearLayout>
 
