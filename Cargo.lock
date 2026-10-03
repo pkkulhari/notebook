@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "notebook"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "gtk4",
  "notebook-core",
@@ -2949,7 +2949,7 @@ dependencies = [
 
 [[package]]
 name = "notebook-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "blake3",
  "iroh",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "notebook-ffi"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "iroh",
  "jni 0.22.4",
