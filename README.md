@@ -16,6 +16,16 @@ An [Android app](#android) shares the same Rust core and syncs with it.
 - **Sync between your devices**, peer to peer. Pair devices with a code; edits made on several devices at once merge instead of overwriting each other.
 - **Native appearance** that follows your GTK theme, including light and dark modes.
 
+## Install
+
+On Ubuntu 24.04 or newer, or Debian 13, on amd64, install Notebook or update it to the latest release with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/pkkulhari/notebook/master/install.sh | sh
+```
+
+The script downloads the latest release's Debian package, checks it against its SHA-256 checksum, and installs it with apt, which asks for your password.
+
 ## Build and run
 
 To build Notebook, you'll need Rust 1.92 or newer, a C compiler, `pkg-config`, and GTK 4.12 or newer.
