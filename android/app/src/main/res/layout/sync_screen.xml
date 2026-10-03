@@ -8,7 +8,7 @@
 
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="56dp"
+        android:layout_height="64dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:paddingHorizontal="4dp">
@@ -17,14 +17,16 @@
             android:id="@+id/sync_back"
             style="@style/ToolbarButton"
             android:contentDescription="@string/back"
-            android:src="@drawable/ic_back" />
+            android:src="@drawable/ic_back"
+            android:tint="@color/text_primary" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:text="@string/sync"
-            android:textAppearance="@android:style/TextAppearance.DeviceDefault.Large"
+            android:textColor="@color/text_primary"
+            android:textSize="24sp"
             android:textStyle="bold" />
     </LinearLayout>
 
@@ -38,7 +40,8 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:paddingHorizontal="20dp"
-            android:paddingBottom="24dp">
+            android:paddingTop="8dp"
+            android:paddingBottom="32dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -52,13 +55,15 @@
                     android:layout_weight="1"
                     android:labelFor="@+id/sync_enabled"
                     android:text="@string/sync_heading"
-                    android:textAppearance="@android:style/TextAppearance.DeviceDefault.Medium"
+                    android:textColor="@color/text_primary"
+                    android:textSize="17sp"
                     android:textStyle="bold" />
 
                 <Switch
                     android:id="@+id/sync_enabled"
                     android:layout_width="wrap_content"
-                    android:layout_height="48dp" />
+                    android:layout_height="48dp"
+                    android:layout_marginStart="16dp" />
             </LinearLayout>
 
             <TextView
@@ -77,6 +82,7 @@
 
             <EditText
                 android:id="@+id/device_name"
+                style="@style/Field"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="@string/device_name"
@@ -112,18 +118,22 @@
 
                 <Button
                     android:id="@+id/show_code"
+                    style="@style/TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
                     android:text="@string/show_code" />
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
                     android:gravity="center_vertical"
                     android:orientation="horizontal">
 
                     <EditText
                         android:id="@+id/join_code"
+                        style="@style/Field"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
@@ -136,8 +146,10 @@
 
                     <Button
                         android:id="@+id/join"
+                        style="@style/FilledButton"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
                         android:text="@string/pair" />
                 </LinearLayout>
             </LinearLayout>
@@ -151,21 +163,29 @@
 
                 <TextView
                     android:id="@+id/pairing_code"
-                    android:layout_width="wrap_content"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
+                    android:background="@drawable/panel"
                     android:fontFamily="monospace"
+                    android:gravity="center"
+                    android:letterSpacing="0.12"
+                    android:paddingVertical="20dp"
+                    android:textColor="@color/text_primary"
                     android:textIsSelectable="true"
                     android:textSize="36sp"
                     android:textStyle="bold" />
 
                 <TextView
                     style="@style/SyncHint"
+                    android:layout_marginTop="8dp"
                     android:text="@string/code_instructions" />
 
                 <Button
                     android:id="@+id/cancel_code"
+                    style="@style/TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
                     android:text="@android:string/cancel" />
             </LinearLayout>
 
@@ -182,8 +202,10 @@
 
                 <Button
                     android:id="@+id/cancel_search"
+                    style="@style/TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
                     android:text="@android:string/cancel" />
             </LinearLayout>
 
@@ -198,11 +220,13 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:gravity="center_vertical"
                 android:orientation="horizontal">
 
                 <EditText
                     android:id="@+id/relay"
+                    style="@style/Field"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
@@ -213,8 +237,10 @@
 
                 <Button
                     android:id="@+id/apply_relay"
+                    style="@style/TonalButton"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
                     android:text="@string/apply" />
             </LinearLayout>
         </LinearLayout>

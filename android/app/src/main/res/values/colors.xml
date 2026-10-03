@@ -1,0 +1,22 @@
+<resources>
+    <color name="accent">#E95420</color>
+    <color name="on_accent">#FFFFFF</color>
+    <!-- The accent deepened until it reads as text: 5.9:1 on the background. -->
+    <color name="accent_ink">#B43A14</color>
+    <color name="accent_tint">#29E95420</color>
+    <color name="text_selection">#4DE95420</color>
+    <color name="focus_ring">#A6E95420</color>
+
+    <color name="background">#FFFFFF</color>
+    <color name="floating">#FFFFFF</color>
+    <color name="field">#0D000000</color>
+    <color name="line">#17000000</color>
+    <color name="ripple">#14000000</color>
+
+    <color name="ink">#171717</color>
+    <color name="ink_muted">#A6171717</color>
+    <color name="ink_faint">#7A171717</color>
+
+    <color name="error">#C01C28</color>
+    <color name="error_tint">#26D56C64</color>
+</resources>

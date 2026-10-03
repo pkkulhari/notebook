@@ -1,0 +1,15 @@
+<resources>
+    <color name="accent_ink">#FF7448</color>
+
+    <color name="background">#272727</color>
+    <color name="floating">#303030</color>
+    <color name="field">#10FFFFFF</color>
+    <color name="line">#17FFFFFF</color>
+    <color name="ripple">#1FFFFFFF</color>
+
+    <color name="ink">#F5F5F5</color>
+    <color name="ink_muted">#A6F5F5F5</color>
+    <color name="ink_faint">#7AF5F5F5</color>
+
+    <color name="error">#FF7B63</color>
+</resources>

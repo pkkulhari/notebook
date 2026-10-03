@@ -371,7 +371,7 @@ fn build(
     editor_header.append(&spacer);
     let trash_button = icon_button(
         "user-trash-symbolic",
-        "Move note to Trash · Ctrl+Shift+Delete",
+        "Move to Trash · Ctrl+Shift+Delete",
     );
     trash_button.set_action_name(Some("win.trash"));
     editor_header.append(&trash_button);
@@ -969,7 +969,7 @@ impl Ui {
         self.trash_button.set_tooltip_text(Some(if note.deleted {
             "Restore note"
         } else {
-            "Move note to Trash"
+            "Move to Trash"
         }));
         let popover = gtk::Popover::new();
         let choices = gtk::Box::new(gtk::Orientation::Vertical, 2);

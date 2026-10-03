@@ -1,0 +1,3 @@
+<resources>
+    <style name="Base.Notebook.Dialog" parent="android:Theme.DeviceDefault.Dialog.Alert" />
+</resources>

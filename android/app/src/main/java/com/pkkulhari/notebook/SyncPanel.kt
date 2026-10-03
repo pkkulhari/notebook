@@ -104,7 +104,8 @@ class SyncPanel(
         if (status.devices.isEmpty()) {
             devices.addView(TextView(context).apply {
                 setText(R.string.no_devices)
-                setTextAppearance(android.R.style.TextAppearance_DeviceDefault_Small)
+                textSize = 14f
+                setTextColor(context.getColorStateList(R.color.text_secondary))
             })
         }
         for (device in status.devices) {
@@ -122,14 +123,16 @@ class SyncPanel(
                 orientation = LinearLayout.VERTICAL
                 addView(TextView(context).apply {
                     text = device.name
-                    setTextAppearance(android.R.style.TextAppearance_DeviceDefault_Medium)
+                    textSize = 16f
+                    setTextColor(context.getColorStateList(R.color.text_primary))
                 })
                 addView(TextView(context).apply {
                     text = state
-                    setTextAppearance(android.R.style.TextAppearance_DeviceDefault_Small)
+                    textSize = 14f
+                    setTextColor(context.getColorStateList(if (device.connected) R.color.accent_text else R.color.text_secondary))
                 })
             }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(Button(context, null, 0, android.R.style.Widget_DeviceDefault_Button_Borderless_Colored).apply {
+            row.addView(Button(context, null, 0, R.style.TextButton).apply {
                 setText(R.string.remove)
                 setOnClickListener { core.sync(SyncControl.Forget(device.id)) }
             })

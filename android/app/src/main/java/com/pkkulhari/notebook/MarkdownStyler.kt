@@ -21,6 +21,7 @@ import android.text.style.ForegroundColorSpan
 import android.text.style.LeadingMarginSpan
 import android.text.style.LineHeightSpan
 import android.text.style.MetricAffectingSpan
+import android.text.style.QuoteSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.ReplacementSpan
 import android.text.style.StrikethroughSpan
@@ -341,7 +342,10 @@ class MarkdownStyler(private val text: NoteEditText) {
         Style.STRONG -> listOf(StyleSpan(Typeface.BOLD))
         Style.EMPHASIS -> listOf(StyleSpan(Typeface.ITALIC))
         Style.STRIKE -> listOf(StrikethroughSpan())
-        Style.QUOTE -> listOf(StyleSpan(Typeface.ITALIC), LeadingMarginSpan.Standard(text.context.dp(24)))
+        Style.QUOTE -> listOf(
+            StyleSpan(Typeface.ITALIC),
+            QuoteSpan(text.context.getColor(R.color.accent), text.context.dp(3), text.context.dp(21)),
+        )
         Style.CODE -> listOf(TypefaceSpan(MONOSPACE), RelativeSizeSpan(0.92f))
         Style.CODE_BLOCK -> listOf(TypefaceSpan(MONOSPACE), RelativeSizeSpan(0.92f), LeadingMarginSpan.Standard(text.context.dp(18)))
         Style.LINK -> listOf(UnderlineSpan(), ForegroundColorSpan(text.linkTextColors.defaultColor))

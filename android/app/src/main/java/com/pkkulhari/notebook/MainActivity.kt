@@ -11,8 +11,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.text.Editable
+import android.text.SpannableString
+import android.text.Spanned
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
 import android.view.KeyEvent
+import android.view.Menu
 import android.view.View
 import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
@@ -34,12 +38,13 @@ class MainActivity : Activity(), Store.Listener {
     private lateinit var listScreen: View
     private lateinit var listTitle: TextView
     private lateinit var search: EditText
+    private lateinit var searchClear: View
     private lateinit var listEmpty: TextView
     private lateinit var editorScreen: View
     private lateinit var location: TextView
     private lateinit var undo: ImageButton
     private lateinit var redo: ImageButton
-    private lateinit var trash: ImageButton
+    private lateinit var restore: ImageButton
     private lateinit var text: NoteEditText
     private lateinit var problem: View
     private lateinit var problemText: TextView
@@ -63,13 +68,14 @@ class MainActivity : Activity(), Store.Listener {
         listScreen = findViewById(R.id.list_screen)
         listTitle = findViewById(R.id.list_title)
         search = findViewById(R.id.search)
+        searchClear = findViewById(R.id.search_clear)
         val notes = findViewById<ListView>(R.id.notes)
         listEmpty = findViewById(R.id.list_empty)
         editorScreen = findViewById(R.id.editor_screen)
         location = findViewById(R.id.location)
         undo = findViewById(R.id.undo)
         redo = findViewById(R.id.redo)
-        trash = findViewById(R.id.trash)
+        restore = findViewById(R.id.restore)
         val openLink = findViewById<ImageButton>(R.id.open_link)
         text = findViewById(R.id.text)
         problem = findViewById(R.id.problem)
@@ -89,19 +95,22 @@ class MainActivity : Activity(), Store.Listener {
         listTitle.setOnClickListener { picker.show() }
         findViewById<View>(R.id.new_note).setOnClickListener { store.newNote() }
         search.setText(store.query)
+        searchClear.visibility = if (store.query.isEmpty()) View.GONE else View.VISIBLE
         search.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable) {
+                searchClear.visibility = if (s.isEmpty()) View.GONE else View.VISIBLE
                 handler.removeCallbacks(runSearch)
                 if (s.toString() != store.query) handler.postDelayed(runSearch, SEARCH_DELAY_MS)
             }
         })
+        searchClear.setOnClickListener { search.text.clear() }
         findViewById<View>(R.id.back).setOnClickListener { store.closeNote() }
         location.setOnClickListener { picker.move(it) }
         undo.setOnClickListener { editor.undo() }
         redo.setOnClickListener { editor.redo() }
-        trash.setOnClickListener { store.trashOrRestore() }
+        restore.setOnClickListener { store.trashOrRestore() }
         findViewById<View>(R.id.more).setOnClickListener { showMore(it) }
         editor.styler.onLink = { url ->
             openLink.visibility = if (url == null) View.GONE else View.VISIBLE
@@ -247,8 +256,7 @@ class MainActivity : Activity(), Store.Listener {
         text.isCursorVisible = editable
         undo.isEnabled = editable
         redo.isEnabled = editable
-        trash.setImageResource(if (note.deleted) R.drawable.ic_restore else R.drawable.ic_trash)
-        trash.contentDescription = getString(if (note.deleted) R.string.restore else R.string.move_to_trash)
+        restore.visibility = if (note.deleted) View.VISIBLE else View.GONE
     }
 
     override fun applied(applied: Applied) {
@@ -274,9 +282,11 @@ class MainActivity : Activity(), Store.Listener {
             else -> getString(R.string.syncing_with_many, connected.size)
         }
         syncButton.tooltipText = syncButton.contentDescription
-        syncButton.imageTintList = ColorStateList.valueOf(
-            getColor(if (connected.isNotEmpty()) android.R.color.system_accent1_500 else android.R.color.system_neutral1_500),
-        )
+        syncButton.imageTintList = if (connected.isNotEmpty()) {
+            ColorStateList.valueOf(getColor(R.color.accent))
+        } else {
+            getColorStateList(R.color.toolbar_icon)
+        }
     }
 
     /** Links are opened deliberately, from the top bar; a tap only places the cursor. */
@@ -293,6 +303,16 @@ class MainActivity : Activity(), Store.Listener {
         val words = text.text.split(WHITESPACE).count { it.isNotEmpty() }
         PopupMenu(this, anchor).apply {
             menu.add(resources.getQuantityString(R.plurals.words, words, words)).isEnabled = false
+            if (store.activeNote?.deleted == false) {
+                menu.setGroupDividerEnabled(true)
+                val title = SpannableString(getString(R.string.move_to_trash)).apply {
+                    setSpan(ForegroundColorSpan(getColor(R.color.error)), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                }
+                menu.add(ACTIONS, Menu.NONE, Menu.NONE, title).setOnMenuItemClickListener {
+                    store.trashOrRestore()
+                    true
+                }
+            }
         }.show()
     }
 
@@ -317,5 +337,6 @@ class MainActivity : Activity(), Store.Listener {
         private const val LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
         private const val LOCAL_NETWORK_REQUEST = 1
         private val WHITESPACE = Regex("\\s+")
+        private const val ACTIONS = 1
     }
 }

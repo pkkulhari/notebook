@@ -1,8 +1,48 @@
 <resources>
+    <!--
+        The desktop's orange and neutral surfaces in place of the platform's
+        wallpaper colours. colorAccent colours text, such as dialog buttons,
+        so it takes the legible shade; controls take the accent itself.
+    -->
     <style name="Theme.Notebook" parent="android:Theme.DeviceDefault.DayNight">
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>
         <item name="android:windowLightStatusBar">@bool/light_bars</item>
         <item name="android:windowLightNavigationBar">@bool/light_bars</item>
+        <item name="android:windowBackground">@color/background</item>
+        <item name="android:colorBackground">@color/background</item>
+        <item name="android:colorBackgroundFloating">@color/floating</item>
+        <item name="android:colorPrimary">@color/accent</item>
+        <item name="android:colorAccent">@color/accent_ink</item>
+        <item name="android:colorControlActivated">@color/accent</item>
+        <item name="android:colorControlNormal">@color/ink_muted</item>
+        <item name="android:colorControlHighlight">@color/ripple</item>
+        <item name="android:colorError">@color/error</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:textColorTertiary">@color/text_secondary</item>
+        <item name="android:textColorHint">@color/ink_faint</item>
+        <item name="android:textColorHighlight">@color/text_selection</item>
+        <item name="android:textColorLink">@color/accent_ink</item>
+        <item name="android:alertDialogTheme">@style/Theme.Notebook.Dialog</item>
+    </style>
+
+    <!-- The platform's alert theme sets its own colours, so they're set again. -->
+    <style name="Base.Notebook.Dialog" parent="android:Theme.DeviceDefault.Light.Dialog.Alert" />
+
+    <style name="Theme.Notebook.Dialog" parent="Base.Notebook.Dialog">
+        <item name="android:colorBackground">@color/floating</item>
+        <item name="android:colorBackgroundFloating">@color/floating</item>
+        <item name="android:colorPrimary">@color/accent</item>
+        <item name="android:colorAccent">@color/accent_ink</item>
+        <item name="android:colorControlActivated">@color/accent</item>
+        <item name="android:colorControlNormal">@color/ink_muted</item>
+        <item name="android:colorControlHighlight">@color/ripple</item>
+        <item name="android:colorError">@color/error</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:textColorTertiary">@color/text_secondary</item>
+        <item name="android:textColorHint">@color/ink_faint</item>
+        <item name="android:textColorHighlight">@color/text_selection</item>
     </style>
 </resources>

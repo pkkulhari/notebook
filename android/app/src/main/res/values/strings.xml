@@ -5,6 +5,7 @@
     <string name="default_notebook">Default</string>
     <string name="search_results">Search results</string>
     <string name="search_notes">Search notes</string>
+    <string name="clear_search">Clear search</string>
     <string name="no_notes">No notes here</string>
     <string name="no_matching_notes">No matching notes</string>
     <string name="new_note">New note</string>
@@ -24,7 +25,7 @@
     <string name="back">Back</string>
     <string name="undo">Undo</string>
     <string name="redo">Redo</string>
-    <string name="move_to_trash">Move note to Trash</string>
+    <string name="move_to_trash">Move to Trash</string>
     <string name="restore">Restore note</string>
     <string name="retry">Retry</string>
     <string name="dismiss">Dismiss</string>
