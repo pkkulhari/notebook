@@ -6,6 +6,7 @@ import android.widget.EditText
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -19,6 +20,31 @@ class MainActivityTest {
             state = text.text.toString() to text.selectionStart
         }
         return state
+    }
+
+    @Test
+    fun leavingANewNoteBlankDoesNotSaveItEvenAfterRecreation() {
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            lateinit var store: Store
+            scenario.onActivity { store = (it.application as NotebookApp).store }
+            waitUntil("the store to be ready") { store.ready }
+            scenario.onActivity {
+                store.closeNote()
+                it.findViewById<View>(R.id.new_note).performClick()
+            }
+            val id = onMain { store.active!! }
+            // Recreation pauses and flushes the store, but the new note stays temporary.
+            scenario.recreate()
+            assertEquals(id, onMain { store.active })
+            scenario.onActivity { it.findViewById<View>(R.id.back).performClick() }
+            assertNull(onMain { store.active })
+            assertNull(onMain { store.core.draftText(id) })
+            // A storage callback is a barrier for every earlier save and list request.
+            onMain { store.createNotebook("Blank note check") }
+            waitUntil("pending storage work") { store.notebooks.any { it.name == "Blank note check" } }
+            assertTrue(onMain { store.notes.none { it.id == id } })
+            scenario.onActivity { assertTrue(it.findViewById<View>(R.id.list_screen).isShown) }
+        }
     }
 
     @Test

@@ -292,7 +292,7 @@ impl Repository {
         let doc = crdt::new_note(
             self.cache.peer,
             &note.body,
-            &self.default_notebook_id,
+            &note.notebook_id,
             now,
             now,
             None,
@@ -565,6 +565,13 @@ impl Repository {
     }
 
     pub fn bootstrap(&mut self) -> Result<(Vec<Notebook>, Note, Preferences)> {
+        self.bootstrap_with_empty_note(true)
+    }
+
+    fn bootstrap_with_empty_note(
+        &mut self,
+        persist_empty: bool,
+    ) -> Result<(Vec<Notebook>, Note, Preferences)> {
         let prefs = self.preferences()?;
         let last = prefs
             .selected_note
@@ -580,7 +587,9 @@ impl Repository {
                 None => {
                     let mut note = Note::blank();
                     note.notebook_id = self.default_notebook_id.clone();
-                    self.create_note(&note)?;
+                    if persist_empty {
+                        self.create_note(&note)?;
+                    }
                     note
                 }
             },
@@ -980,6 +989,8 @@ pub type Outbox = tokio::sync::mpsc::UnboundedSender<DocChange>;
 #[derive(Clone, Debug)]
 pub enum Command {
     Initialize,
+    /// On an empty database, offer a temporary draft instead of saving a blank note.
+    InitializeEmptyDraft,
     List {
         filter: Filter,
         query: String,
@@ -1076,8 +1087,10 @@ pub fn spawn_worker(path: PathBuf) -> (Sender<Command>, Receiver<Event>) {
                     }
                     let repo = repository.as_mut().expect("initialized above");
                     Ok(match &command {
-                        Command::Initialize => {
-                            let (notebooks, note, preferences) = repo.bootstrap()?;
+                        Command::Initialize | Command::InitializeEmptyDraft => {
+                            let (notebooks, note, preferences) = repo.bootstrap_with_empty_note(
+                                matches!(command, Command::Initialize),
+                            )?;
                             Some(Event::Ready {
                                 default_notebook_id: repo.default_notebook_id().into(),
                                 notebooks,

@@ -257,7 +257,7 @@ impl From<&storage::Command> for Operation {
     fn from(command: &storage::Command) -> Self {
         use storage::Command;
         match command {
-            Command::Initialize => Operation::Open,
+            Command::Initialize | Command::InitializeEmptyDraft => Operation::Open,
             Command::List { .. } => Operation::List,
             Command::Load { .. } => Operation::Load,
             Command::Create(_) => Operation::Create,

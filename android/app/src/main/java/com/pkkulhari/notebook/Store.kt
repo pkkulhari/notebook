@@ -282,6 +282,8 @@ class Store(
         val note = core.createNote()
         filter = Filter.Notebook(defaultNotebookId)
         query = ""
+        // Refresh this filter on return even if the temporary note is discarded.
+        listStale = true
         // Notify even when already empty: the widget may have a pending search.
         listener?.queryChanged()
         show(note, "", 0, focus = true)
@@ -328,6 +330,8 @@ class Store(
         val id = active ?: return
         core.flush()
         core.mutate(Mutation.Move(id, notebookId))
+        // A temporary note moves locally, without a storage callback.
+        listener?.activeChanged()
     }
 
     fun createNotebook(name: String) {

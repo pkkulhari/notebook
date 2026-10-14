@@ -99,7 +99,7 @@ impl Core {
 
     /// Opens the database. `Ready` follows.
     pub fn initialize(&self) {
-        self.send(Command::Initialize);
+        self.send(Command::InitializeEmptyDraft);
     }
 
     /// Lists notes matching `query`. `Listed` follows with the same
@@ -120,19 +120,20 @@ impl Core {
         });
     }
 
-    /// Starts a note in the Default notebook with an empty draft, and asks
-    /// storage to create it. `Created` follows.
+    /// Starts a temporary note in Default. Storage creates it on its first
+    /// save with content; leaving it blank never creates a stored note.
     pub fn create_note(&self) -> NoteInfo {
         let mut note = Note::blank();
         note.notebook_id = self.shared.default_notebook.lock().unwrap().clone();
-        self.drafts().open(note.clone(), &[], false);
-        let info = NoteInfo::from(&note);
-        self.send(Command::Create(note));
-        info
+        self.drafts().start(note.clone());
+        NoteInfo::from(&note)
     }
 
     pub fn mutate(&self, mutation: Mutation) {
-        self.send(Command::Mutate(mutation.into()));
+        let mutation = mutation.into();
+        if !self.drafts().mutate_temporary(&mutation) {
+            self.send(Command::Mutate(mutation));
+        }
     }
 
     /// `cursor` is in UTF-16 units; Android's preferences are its own.
@@ -170,7 +171,11 @@ impl Core {
     /// Opens a note's draft from its snapshot, replacing any open one, and
     /// returns its text.
     pub fn open_draft(&self, note: NoteInfo, snapshot: Vec<u8>) -> String {
-        self.drafts().open(note.into(), &snapshot, true).text()
+        if snapshot.is_empty() {
+            self.drafts().start(note.into()).text()
+        } else {
+            self.drafts().open(note.into(), &snapshot, true).text()
+        }
     }
 
     /// An open draft's text, or `None` if the note has no draft.
@@ -243,8 +248,8 @@ impl Core {
         next.map_or(-1, |wait| wait.as_micros().div_ceil(1000) as i64)
     }
 
-    /// Closes the least recently shown drafts beyond the cache limit, never
-    /// `active` or one with unsaved edits.
+    /// Discards inactive temporary blanks and trims saved drafts beyond the
+    /// cache limit, keeping `active` and unsaved content.
     pub fn trim_drafts(&self, active: Option<String>) {
         self.drafts().trim(active.as_deref());
     }

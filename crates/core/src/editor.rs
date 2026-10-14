@@ -85,6 +85,8 @@ pub struct Draft {
     last_queued: Instant,
     last_opened: Instant,
     created: bool,
+    /// A new draft that has not yet been sent to storage.
+    temporary: bool,
 }
 
 impl Draft {
@@ -130,6 +132,7 @@ impl Draft {
             last_queued: now,
             last_opened: now,
             created,
+            temporary: false,
         }
     }
 
@@ -344,7 +347,21 @@ impl Draft {
     }
 
     fn is_due(&self, now: Instant) -> bool {
-        self.has_unsent() && self.due_at() <= now
+        self.needs_save() && self.due_at() <= now
+    }
+
+    fn needs_save(&self) -> bool {
+        self.has_unsent() && (!self.temporary || !self.text().trim().is_empty())
+    }
+
+    fn save_commands(&mut self, now: Instant) -> Vec<Command> {
+        let mut commands = vec![];
+        if self.temporary {
+            self.temporary = false;
+            commands.push(Command::Create(self.note.clone()));
+        }
+        commands.push(self.save_command(now));
+        commands
     }
 
     /// Saves every edit the draft has made since storage last confirmed a save.
@@ -402,6 +419,26 @@ impl Drafts {
         self.drafts.entry(id).insert_entry(draft).into_mut()
     }
 
+    /// Starts a note that only reaches storage once it has content to save.
+    pub fn start(&mut self, note: Note) -> &mut Draft {
+        let draft = self.open(note, &[], false);
+        draft.temporary = true;
+        draft
+    }
+
+    /// Note actions on a temporary draft need no storage record yet.
+    pub fn mutate_temporary(&mut self, mutation: &Mutation) -> bool {
+        let id = match mutation {
+            Mutation::Move { id, .. } | Mutation::Trash { id } | Mutation::Restore { id } => id,
+            _ => return false,
+        };
+        if !self.drafts.get(id).is_some_and(|d| d.temporary) {
+            return false;
+        }
+        self.mutated(mutation, "");
+        true
+    }
+
     pub fn get(&self, id: &str) -> Option<&Draft> {
         self.drafts.get(id)
     }
@@ -414,12 +451,12 @@ impl Drafts {
         self.drafts.values()
     }
 
-    /// Edit commands for drafts whose save is due at `now`.
+    /// Saves due at `now`, creating temporary notes before their first edit.
     pub fn due(&mut self, now: Instant) -> Vec<Command> {
         self.drafts
             .values_mut()
             .filter(|d| d.is_due(now))
-            .map(|d| d.save_command(now))
+            .flat_map(|d| d.save_commands(now))
             .collect()
     }
 
@@ -428,19 +465,19 @@ impl Drafts {
     pub fn next_due(&self, now: Instant) -> Option<Duration> {
         self.drafts
             .values()
-            .filter(|d| d.has_unsent())
+            .filter(|d| d.needs_save())
             .map(Draft::due_at)
             .min()
             .map(|due| due.saturating_duration_since(now))
     }
 
-    /// Edit commands for every draft with unsent edits, whatever the timing.
+    /// Saves every draft with unsent content, whatever the timing.
     pub fn flush(&mut self) -> Vec<Command> {
         let now = Instant::now();
         self.drafts
             .values_mut()
-            .filter(|d| d.has_unsent())
-            .map(|d| d.save_command(now))
+            .filter(|d| d.needs_save())
+            .flat_map(|d| d.save_commands(now))
             .collect()
     }
 
@@ -509,13 +546,22 @@ impl Drafts {
         trashed
     }
 
-    /// Closes the least recently shown drafts beyond the cache limit, and
-    /// returns their IDs. Never closes the `active` draft or one with edits
-    /// storage hasn't confirmed.
+    /// Discards inactive temporary blanks, then closes the least recently
+    /// shown drafts beyond the cache limit. Returns their IDs, keeping the
+    /// active draft and any unsaved content.
     pub fn trim(&mut self, active: Option<&str>) -> Vec<String> {
+        let mut closed = vec![];
+        self.drafts.retain(|id, draft| {
+            let discard =
+                active != Some(id.as_str()) && draft.temporary && draft.text().trim().is_empty();
+            if discard {
+                closed.push(id.clone());
+            }
+            !discard
+        });
         let excess = self.drafts.len().saturating_sub(CACHE_LIMIT);
         if excess == 0 {
-            return vec![];
+            return closed;
         }
         let mut candidates: Vec<_> = self
             .drafts
@@ -531,14 +577,11 @@ impl Drafts {
             .map(|(id, d)| (d.last_opened, id.clone()))
             .collect();
         candidates.sort();
-        candidates
-            .into_iter()
-            .take(excess)
-            .map(|(_, id)| {
-                self.drafts.remove(&id);
-                id
-            })
-            .collect()
+        closed.extend(candidates.into_iter().take(excess).map(|(_, id)| {
+            self.drafts.remove(&id);
+            id
+        }));
+        closed
     }
 }
 
@@ -592,7 +635,7 @@ fn retry_key(command: &Command) -> Option<(&'static str, &str)> {
     match command {
         Command::Edit { id, .. } => Some(("save", id)),
         Command::Create(note) => Some(("create", &note.id)),
-        Command::Initialize => Some(("initialize", "")),
+        Command::Initialize | Command::InitializeEmptyDraft => Some(("initialize", "")),
         Command::Preferences(_) => Some(("preferences", "")),
         _ => None,
     }

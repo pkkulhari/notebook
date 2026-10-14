@@ -149,6 +149,122 @@ fn ready_brings_a_note_and_sync_reports_its_status() {
 }
 
 #[test]
+fn blank_notes_stay_temporary_and_are_discarded_when_closed() {
+    let phone = Phone::start();
+    let first = phone.ready();
+    let untouched = phone.core.create_note().id;
+    let whitespace = phone.core.create_note().id;
+    phone
+        .core
+        .replace(whitespace.clone(), 0, 0, " \n\t".into())
+        .unwrap();
+    let cleared = phone.core.create_note().id;
+    phone
+        .core
+        .replace(cleared.clone(), 0, 0, "Changed my mind".into())
+        .unwrap();
+    phone
+        .core
+        .replace(cleared.clone(), 0, 15, String::new())
+        .unwrap();
+
+    // Pausing or rotating flushes the editor, but must not persist empty drafts.
+    phone.core.flush();
+    assert_eq!(phone.core.tick(), -1);
+    phone
+        .events
+        .wait("Flushed", |e| matches!(e, CoreEvent::Flushed).then_some(()));
+    phone.core.trim_drafts(Some(untouched.clone()));
+    assert_eq!(
+        phone.core.draft_text(untouched.clone()),
+        Some(String::new())
+    );
+    phone.core.trim_drafts(None);
+    let repo = Repository::open(&phone.dir.path().join("notebook.db")).unwrap();
+    for id in [first, untouched, whitespace, cleared] {
+        assert_eq!(phone.core.draft_text(id.clone()), None);
+        assert!(repo.load(&id).unwrap().is_none());
+    }
+    assert!(
+        repo.list(&notebook_core::model::Filter::All, "")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.list(&notebook_core::model::Filter::Trash, "")
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn moving_a_temporary_note_keeps_it_temporary_until_typing() {
+    let phone = Phone::start();
+    let id = phone.ready();
+    let notebook = "work".to_string();
+    phone.core.mutate(Mutation::CreateNotebook {
+        id: notebook.clone(),
+        name: "Work".into(),
+    });
+    phone.events.wait("notebook", |e| match e {
+        CoreEvent::Mutated {
+            mutation: Mutation::CreateNotebook { .. },
+            ..
+        } => Some(()),
+        _ => None,
+    });
+    phone.core.mutate(Mutation::Move {
+        id: id.clone(),
+        notebook_id: notebook.clone(),
+    });
+    assert_eq!(
+        phone.core.draft_note(id.clone()).unwrap().notebook_id,
+        notebook
+    );
+    assert!(
+        Repository::open(&phone.dir.path().join("notebook.db"))
+            .unwrap()
+            .load(&id)
+            .unwrap()
+            .is_none()
+    );
+    phone
+        .core
+        .replace(id.clone(), 0, 0, "Keep this".into())
+        .unwrap();
+    phone.core.flush();
+    phone.events.saved(&id);
+    let stored = Repository::open(&phone.dir.path().join("notebook.db"))
+        .unwrap()
+        .load(&id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.body, "Keep this");
+    assert_eq!(stored.notebook_id, notebook);
+}
+
+#[test]
+fn clearing_a_saved_note_keeps_the_existing_note() {
+    let phone = Phone::start();
+    let id = phone.ready();
+    phone
+        .core
+        .replace(id.clone(), 0, 0, "Keep this note".into())
+        .unwrap();
+    phone.core.flush();
+    phone.events.saved(&id);
+    phone.events.events.lock().unwrap().clear();
+    phone
+        .core
+        .replace(id.clone(), 0, 14, String::new())
+        .unwrap();
+    phone.core.flush();
+    phone.events.saved(&id);
+    phone.core.trim_drafts(None);
+    assert_eq!(phone.stored(&id), "");
+}
+
+#[test]
 fn typing_after_an_emoji_is_saved_after_a_pause() {
     let phone = Phone::start();
     let id = phone.ready();
