@@ -112,6 +112,23 @@ row:focus-within .notebook-options, .notebook-options:focus-within { opacity: 1;
 .note-date { color: @nb_muted; font-size: 11px; }
 .list-empty { color: @nb_muted; font-size: 12px; }
 .editor-heading { padding: 15px 26px 0 42px; }
+.slash-menu { font-size: 14px; font-weight: normal; }
+.notebook-app popover.slash-menu > contents {
+  background: @nb_sidebar;
+  border: 1px solid @nb_line;
+  border-radius: 12px;
+  padding: 6px;
+  box-shadow: 0 8px 24px alpha(black, 0.18);
+}
+.slash-heading { padding: 6px 10px 9px; font-size: 12px; color: @nb_muted; }
+.slash-options { background: transparent; }
+.slash-options row { padding: 9px 10px; border-radius: 7px; color: @nb_text; }
+.slash-options row:hover { background: @nb_hover; }
+.slash-options row:selected { background: @nb_selected; }
+.slash-icon { font-size: 17px; }
+.slash-footer { padding: 10px 10px 4px; font-size: 11px; color: @nb_muted; }
+.slash-empty { padding: 20px 12px; color: @nb_muted; }
+.slash-menu separator { margin-top: 6px; background: @nb_line; min-height: 1px; }
 .location-menu > button { font-size: 12px; padding: 4px 6px; }
 .editor, .editor text {
   background: @nb_editor;

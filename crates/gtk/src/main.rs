@@ -1,3 +1,5 @@
+mod formatting;
+mod slash_menu;
 mod system;
 mod ui;
 

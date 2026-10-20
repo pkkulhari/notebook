@@ -24,7 +24,8 @@ impl Style {
         Some(match name {
             "h1" => Style::H1,
             "h2" => Style::H2,
-            "h3" => Style::H3,
+            // Keep the phone's existing heading presentation and ABI.
+            "h3" | "h4" | "h5" | "h6" => Style::H3,
             "strong" => Style::Strong,
             "emphasis" => Style::Emphasis,
             "strike" => Style::Strike,

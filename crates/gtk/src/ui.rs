@@ -1,3 +1,7 @@
+use crate::{
+    formatting::{self, Block, Format},
+    slash_menu::{self, Action as MenuAction, SlashMenu},
+};
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use notebook_core::{
     editor::{Applied, Draft, Drafts, Failures, OutOfSync, TextEdit},
@@ -20,6 +24,9 @@ struct Page {
     buffer: gtk::TextBuffer,
     /// The buffer's text as of its last change.
     body: String,
+    /// Source before the current native edit, for repairing hidden delimiters
+    /// once GTK has finished using its insertion/deletion iterators.
+    before_edit: Option<String>,
 }
 
 struct State {
@@ -35,7 +42,6 @@ struct State {
     load_generation: u64,
     parse_generation: u64,
     parsed_generation: u64,
-    parse_due: Option<Instant>,
     document: Document,
     hidden_applied: Vec<std::ops::Range<i32>>,
     failed: Failures,
@@ -85,6 +91,7 @@ pub(crate) struct Ui {
     active_position: Rc<Cell<u32>>,
     selection: gtk::SingleSelection,
     editor: gtk::TextView,
+    slash: SlashMenu,
     editor_stack: gtk::Stack,
     placeholder: gtk::Label,
     list_empty: gtk::Label,
@@ -97,8 +104,6 @@ pub(crate) struct Ui {
     retry: gtk::Button,
     commands: Sender<Command>,
     events: Receiver<Event>,
-    parse_requests: Sender<(u64, String)>,
-    parse_results: Receiver<(u64, Document)>,
     state: RefCell<State>,
     sync: SyncHandle,
     sync_statuses: Receiver<sync::Status>,
@@ -110,8 +115,15 @@ pub(crate) struct Ui {
     from_doc: Cell<bool>,
     allow_close: Cell<bool>,
     search_due: Cell<Option<Instant>>,
+    selection_due: Cell<Option<Instant>>,
     prefs_due: Cell<Instant>,
     dates_updated: Cell<Instant>,
+}
+
+impl Drop for Ui {
+    fn drop(&mut self) {
+        self.slash.popover.unparent();
+    }
 }
 
 pub(crate) fn launch(app: &gtk::Application) -> Rc<Ui> {
@@ -143,25 +155,6 @@ fn build(
         },
         sync_options,
     );
-    let (parse_requests, incoming) = mpsc::channel::<(u64, String)>();
-    let (outgoing, parse_results) = mpsc::channel();
-    std::thread::Builder::new()
-        .name("notebook-markdown".into())
-        .spawn(move || {
-            while let Ok(mut job) = incoming.recv() {
-                while let Ok(newer) = incoming.try_recv() {
-                    job = newer;
-                }
-                if outgoing
-                    .send((job.0, markdown::parse(&job.1, Units::Chars)))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .expect("could not start Markdown worker");
-
     let css = gtk::CssProvider::new();
     css.load_from_string(include_str!("style.css"));
     gtk::style_context_add_provider_for_display(
@@ -369,10 +362,7 @@ fn build(
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     editor_header.append(&spacer);
-    let trash_button = icon_button(
-        "user-trash-symbolic",
-        "Move to Trash · Ctrl+Shift+Delete",
-    );
+    let trash_button = icon_button("user-trash-symbolic", "Move to Trash · Ctrl+Shift+Delete");
     trash_button.set_action_name(Some("win.trash"));
     editor_header.append(&trash_button);
     writing.append(&editor_header);
@@ -389,6 +379,12 @@ fn build(
         .build();
     editor.add_css_class("editor");
     editor.set_accepts_tab(true);
+    let slash = SlashMenu::new(&editor);
+    let formats = gio::Menu::new();
+    formats.append(Some("Bold"), Some("win.bold"));
+    formats.append(Some("Italic"), Some("win.italic"));
+    formats.append(Some("Strikethrough"), Some("win.strike"));
+    editor.set_extra_menu(Some(&formats));
     let editor_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(&editor)
@@ -397,7 +393,7 @@ fn build(
     editor_stack.set_vexpand(true);
     let editor_overlay = gtk::Overlay::new();
     editor_overlay.set_child(Some(&editor_scroll));
-    let placeholder = gtk::Label::new(Some("Start writing…"));
+    let placeholder = gtk::Label::new(Some("Start writing, or type / for commands…"));
     placeholder.add_css_class("writing-placeholder");
     placeholder.set_halign(gtk::Align::Start);
     placeholder.set_valign(gtk::Align::Start);
@@ -428,6 +424,7 @@ fn build(
     words.set_xalign(0.0);
     words.set_hexpand(true);
     editor_footer.append(&words);
+    editor_footer.append(&gtk::Label::new(Some("Type / for commands")));
     writing.append(&editor_footer);
 
     let inner = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -476,6 +473,7 @@ fn build(
         active_position,
         selection,
         editor,
+        slash,
         editor_stack,
         placeholder,
         list_empty,
@@ -493,12 +491,11 @@ fn build(
         sync_status: RefCell::new(sync::Status::default()),
         sync_button,
         sync_dialog: RefCell::new(None),
-        parse_requests,
-        parse_results,
         updating: Cell::new(false),
         from_doc: Cell::new(false),
         allow_close: Cell::new(false),
         search_due: Cell::new(None),
+        selection_due: Cell::new(None),
         prefs_due: Cell::new(Instant::now()),
         dates_updated: Cell::new(Instant::now()),
         state: RefCell::new(State {
@@ -514,7 +511,6 @@ fn build(
             load_generation: 0,
             parse_generation: 0,
             parsed_generation: 0,
-            parse_due: None,
             document: Document::default(),
             hidden_applied: vec![],
             failed: Failures::default(),
@@ -541,6 +537,41 @@ fn build(
 
 impl Ui {
     fn connect(self: &Rc<Self>, app: &gtk::Application) {
+        let weak = Rc::downgrade(self);
+        self.slash.list.connect_row_activated(move |_, row| {
+            if let Some(ui) = weak.upgrade()
+                && let Some(command) = slash_menu::COMMANDS.get(row.index() as usize)
+            {
+                ui.run_menu_action(command.action);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.editor.connect_has_focus_notify(move |editor| {
+            if !editor.has_focus()
+                && let Some(ui) = weak.upgrade()
+            {
+                ui.dismiss_format_menu();
+            }
+        });
+        let dismiss = gtk::GestureClick::new();
+        dismiss.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        dismiss.connect_pressed(move |_, _, x, y| {
+            if let Some(ui) = weak.upgrade()
+                && (ui.slash.popover.is_visible() || ui.selection_due.get().is_some())
+            {
+                let in_menu = ui
+                    .window
+                    .pick(x, y, gtk::PickFlags::DEFAULT)
+                    .is_some_and(|target| {
+                        target == ui.slash.popover || target.is_ancestor(&ui.slash.popover)
+                    });
+                if !in_menu {
+                    ui.dismiss_format_menu();
+                }
+            }
+        });
+        self.window.add_controller(dismiss);
         for name in ["rename-book", "delete-book"] {
             let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
             let weak = Rc::downgrade(self);
@@ -596,11 +627,20 @@ impl Ui {
         });
         self.action("undo", |ui| ui.undo_redo(true));
         self.action("redo", |ui| ui.undo_redo(false));
+        for (action, format) in [
+            ("bold", Format::Bold),
+            ("italic", Format::Italic),
+            ("strike", Format::Strike),
+            ("bullets", Format::Bullets),
+            ("numbers", Format::Numbers),
+        ] {
+            self.action(action, move |ui| ui.format_selection(format));
+        }
         self.action("save", |ui| ui.flush_drafts());
         self.action("sync", |ui| ui.show_sync_dialog());
         self.action("shortcuts", |ui| {
             let dialog = gtk::Window::builder().title("Keyboard shortcuts").transient_for(&ui.window).modal(true).default_width(420).build();
-            let label = gtk::Label::new(Some("New note                 Ctrl+N\nSearch all notes         Ctrl+F\nFocus writing            F9\nSave now                 Ctrl+S\nUndo                     Ctrl+Z\nRedo                     Ctrl+Shift+Z\nTrash / restore          Ctrl+Shift+Delete\nOpen link                Ctrl+click\nReturn to writing        Escape"));
+            let label = gtk::Label::new(Some("New note                 Ctrl+N\nSearch all notes         Ctrl+F\nFocus writing            F9\nSave now                 Ctrl+S\nUndo                     Ctrl+Z\nRedo                     Ctrl+Shift+Z\nBlock menu               Type /\nChoose block             ↑↓ then Enter or Tab\nBold selection           Ctrl+B\nItalic selection         Ctrl+I\nStrikethrough selection  Ctrl+Shift+X\nBulleted list            Ctrl+Shift+7\nNumbered list            Ctrl+Shift+8\nTrash / restore          Ctrl+Shift+Delete\nOpen link                Ctrl+click\nClose menu / editor      Escape"));
             label.set_margin_top(28); label.set_margin_bottom(28); label.set_margin_start(28); label.set_margin_end(28); label.add_css_class("shortcuts"); dialog.set_child(Some(&label)); dialog.present();
         });
         for (action, keys) in [
@@ -611,6 +651,11 @@ impl Ui {
             ("undo", vec!["<Primary>z"]),
             ("redo", vec!["<Primary><Shift>z"]),
             ("save", vec!["<Primary>s"]),
+            ("bold", vec!["<Primary>b"]),
+            ("italic", vec!["<Primary>i"]),
+            ("strike", vec!["<Primary><Shift>x"]),
+            ("bullets", vec!["<Primary><Shift>7"]),
+            ("numbers", vec!["<Primary><Shift>8"]),
         ] {
             app.set_accels_for_action(&format!("win.{action}"), &keys);
         }
@@ -729,6 +774,15 @@ impl Ui {
         enter.set_propagation_phase(gtk::PropagationPhase::Capture);
         let weak = Rc::downgrade(self);
         enter.connect_key_pressed(move |_, key, _, modifiers| {
+            if !modifiers.intersects(
+                gdk::ModifierType::SHIFT_MASK
+                    | gdk::ModifierType::CONTROL_MASK
+                    | gdk::ModifierType::ALT_MASK,
+            ) && let Some(ui) = weak.upgrade()
+                && ui.slash_key(key)
+            {
+                return glib::Propagation::Stop;
+            }
             let plain_enter = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
                 && !modifiers.intersects(
                     gdk::ModifierType::SHIFT_MASK
@@ -741,19 +795,39 @@ impl Ui {
             }
         });
         self.editor.add_controller(enter);
-        // Preserve Markdown delimiters even when presentation tags hide them.
+        // Delete a visible grapheme, not the invisible delimiter beside it.
+        let weak = Rc::downgrade(self);
+        self.editor.connect_backspace(move |view| {
+            if let Some(ui) = weak.upgrade() {
+                view.stop_signal_emission_by_name("backspace");
+                ui.delete_visible(true);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.editor
+            .connect_delete_from_cursor(move |view, kind, count| {
+                if kind == gtk::DeleteType::Chars
+                    && let Some(ui) = weak.upgrade()
+                {
+                    view.stop_signal_emission_by_name("delete-from-cursor");
+                    for _ in 0..count.unsigned_abs() {
+                        ui.delete_visible(count < 0);
+                    }
+                }
+            });
+        // Copy the text the user sees, without hidden Markdown syntax.
         self.editor.connect_copy_clipboard(|view| {
             view.stop_signal_emission_by_name("copy-clipboard");
             let buffer = view.buffer();
             if let Some((start, end)) = buffer.selection_bounds() {
-                view.clipboard().set_text(&buffer.text(&start, &end, true));
+                view.clipboard().set_text(&buffer.text(&start, &end, false));
             }
         });
         self.editor.connect_cut_clipboard(|view| {
             view.stop_signal_emission_by_name("cut-clipboard");
             let buffer = view.buffer();
             if let Some((start, end)) = buffer.selection_bounds() {
-                view.clipboard().set_text(&buffer.text(&start, &end, true));
+                view.clipboard().set_text(&buffer.text(&start, &end, false));
                 if view.is_editable() {
                     buffer.begin_user_action();
                     buffer.delete_selection(true, true);
@@ -942,6 +1016,7 @@ impl Ui {
     }
 
     fn update_location(self: &Rc<Self>) {
+        self.refresh_slash(false);
         let s = self.state.borrow();
         let note = s
             .active
@@ -1038,31 +1113,52 @@ impl Ui {
                 && !ui.from_doc.get()
             {
                 ui.text_changed(&page, buffer);
+                let weak = Rc::downgrade(&ui);
+                let page = page.clone();
+                // Changes outside a GTK user action (including accessibility
+                // edits) also settle before the next frame.
+                glib::idle_add_local_once(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.finish_rich_edit(&page);
+                    }
+                });
+            }
+        });
+        let (weak, page) = (Rc::downgrade(self), id.clone());
+        buffer.connect_end_user_action(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.finish_rich_edit(&page);
             }
         });
         let weak = Rc::downgrade(self);
-        buffer.connect_mark_set(move |_, _, mark| {
+        buffer.connect_mark_set(move |buffer, _, mark| {
             if (mark.name().as_deref() == Some("insert")
                 || mark.name().as_deref() == Some("selection_bound"))
                 && let Some(ui) = weak.upgrade()
                 && !ui.updating.get()
+                && !ui.from_doc.get()
+                && *buffer == ui.editor.buffer()
             {
-                ui.update_hidden();
+                ui.refresh_slash(false);
             }
         });
-        self.state
-            .borrow_mut()
-            .pages
-            .insert(id, Page { buffer, body });
+        self.state.borrow_mut().pages.insert(
+            id,
+            Page {
+                buffer,
+                body,
+                before_edit: None,
+            },
+        );
     }
 
     fn display_note(self: &Rc<Self>, id: &str, cursor: Option<i32>) {
+        self.slash.close();
         self.updating.set(true);
         let (buffer, editable) = {
             let mut s = self.state.borrow_mut();
             s.active = Some(id.into());
             s.parse_generation += 1;
-            s.parse_due = Some(Instant::now());
             s.document = Document::default();
             let d = s.drafts.get_mut(id).expect("loaded draft");
             d.touch();
@@ -1077,8 +1173,10 @@ impl Ui {
         if let Some(cursor) = cursor {
             buffer.place_cursor(&buffer.iter_at_offset(cursor.clamp(0, buffer.char_count())));
         }
+        self.dismiss_format_menu();
         self.editor_stack.set_visible_child_name("editor");
         self.updating.set(false);
+        self.render_now(id);
         self.update_location();
         self.editor.grab_focus();
         self.update_word_count();
@@ -1179,6 +1277,10 @@ impl Ui {
     }
 
     fn flush_drafts(&self) {
+        let ids: Vec<_> = self.state.borrow().pages.keys().cloned().collect();
+        for id in ids {
+            self.finish_rich_edit(&id);
+        }
         let commands = self.state.borrow_mut().drafts.flush();
         for command in commands {
             self.send(command);
@@ -1191,7 +1293,13 @@ impl Ui {
         if self.from_doc.get() {
             return;
         }
-        if let Some(d) = self.state.borrow_mut().drafts.get_mut(id) {
+        let mut s = self.state.borrow_mut();
+        if let Some(page) = s.pages.get_mut(id)
+            && page.before_edit.is_none()
+        {
+            page.before_edit = Some(page.body.clone());
+        }
+        if let Some(d) = s.drafts.get_mut(id) {
             let _ = edit(d);
         }
     }
@@ -1208,17 +1316,403 @@ impl Ui {
         if s.active.as_deref() == Some(id) {
             self.placeholder.set_visible(empty);
             s.parse_generation += 1;
-            s.parse_due = Some(Instant::now() + Duration::from_millis(80));
             s.document = Document::default();
-            // Tags elsewhere track edits automatically. Reveal only the edited line
-            // while a new parse is pending, avoiding whole-document flicker.
-            let mut start = buffer.iter_at_offset(buffer.cursor_position());
-            start.set_line_offset(0);
-            let mut end = start;
-            end.forward_to_line_end();
-            buffer.remove_tag_by_name("hidden", &start, &end);
         }
         guard_buffer_end(buffer);
+    }
+
+    fn render_now(&self, id: &str) {
+        let body = {
+            let s = self.state.borrow();
+            if s.active.as_deref() != Some(id) {
+                return;
+            }
+            s.pages[id].body.clone()
+        };
+        let document = markdown::parse(&body, Units::Chars);
+        {
+            let mut s = self.state.borrow_mut();
+            s.document = document;
+            s.parsed_generation = s.parse_generation;
+        }
+        self.apply_document();
+        self.refresh_slash(false);
+    }
+
+    fn finish_rich_edit(&self, id: &str) {
+        let pending = {
+            let mut s = self.state.borrow_mut();
+            let Some(page) = s.pages.get_mut(id) else {
+                return;
+            };
+            page.before_edit
+                .take()
+                .map(|before| (before, page.body.clone(), page.buffer.clone()))
+        };
+        let Some((before, after, buffer)) = pending else {
+            return;
+        };
+        let old: Vec<_> = before.chars().collect();
+        let new: Vec<_> = after.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        // Reconstruct the native replacement using visible-text deletion.
+        // Deleting only syntax keeps it intact; inserted text still survives.
+        let deletion = formatting::delete(&before, prefix..old.len() - suffix);
+        let (base, at) =
+            deletion.map_or((before, prefix), |edit| (edit.text, edit.selection.start));
+        let inserted: String = new[prefix..new.len() - suffix].iter().collect();
+        let mut edit = formatting::insert(&base, at, &inserted);
+        if edit.text != after {
+            edit.range = 0..new.len();
+            self.replace_source(id, &buffer, edit);
+        }
+        self.render_now(id);
+        let active = self.state.borrow().active.as_deref() == Some(id);
+        if active {
+            self.refresh_slash(inserted.contains('/'));
+        }
+    }
+
+    fn replace_source(&self, id: &str, buffer: &gtk::TextBuffer, edit: formatting::Edit) {
+        {
+            let mut s = self.state.borrow_mut();
+            let Some(draft) = s.drafts.get_mut(id) else {
+                return;
+            };
+            if draft
+                .replace(edit.range.start, edit.range.len(), &edit.text)
+                .is_err()
+            {
+                return;
+            }
+        }
+        let old: Vec<_> = buffer
+            .text(
+                &buffer.iter_at_offset(edit.range.start as i32),
+                &buffer.iter_at_offset(edit.range.end as i32),
+                true,
+            )
+            .chars()
+            .collect();
+        let new: Vec<_> = edit.text.chars().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let start = edit.range.start + prefix;
+        let end = edit.range.end - suffix;
+        let inserted: String = new[prefix..new.len() - suffix].iter().collect();
+        self.from_doc.set(true);
+        self.updating.set(true);
+        let inserted_len = inserted.chars().count();
+        buffer.insert(&mut buffer.iter_at_offset(start as i32), &inserted);
+        if buffer.has_selection() && !edit.selection.is_empty() && inserted_len > 0 {
+            // Keep the primary selection alive throughout the replacement.
+            // Clearing and reclaiming it in one event can make X11 deliver a
+            // stale ownership-loss notification that deselects the new text.
+            buffer.select_range(
+                &buffer.iter_at_offset((start + inserted_len) as i32),
+                &buffer.iter_at_offset(start as i32),
+            );
+        }
+        buffer.delete(
+            &mut buffer.iter_at_offset((start + inserted_len) as i32),
+            &mut buffer.iter_at_offset((end + inserted_len) as i32),
+        );
+        buffer.select_range(
+            &buffer.iter_at_offset(edit.selection.end as i32),
+            &buffer.iter_at_offset(edit.selection.start as i32),
+        );
+        self.updating.set(false);
+        self.from_doc.set(false);
+        self.text_changed(id, buffer);
+    }
+
+    fn format_selection(&self, format: Format) {
+        if !self.editor.is_editable() {
+            return;
+        }
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        self.finish_rich_edit(&id);
+        let buffer = self.editor.buffer();
+        let selection = buffer
+            .selection_bounds()
+            .map(|(a, b)| a.offset() as usize..b.offset() as usize)
+            .unwrap_or_else(|| {
+                let at = buffer.cursor_position() as usize;
+                at..at
+            });
+        let body = self.state.borrow().pages[&id].body.clone();
+        if let Some(edit) = formatting::toggle(&body, selection, format) {
+            self.state
+                .borrow_mut()
+                .drafts
+                .get_mut(&id)
+                .unwrap()
+                .undo_boundary();
+            self.replace_source(&id, &buffer, edit);
+            self.state
+                .borrow_mut()
+                .drafts
+                .get_mut(&id)
+                .unwrap()
+                .undo_boundary();
+            self.dismiss_format_menu();
+            self.render_now(&id);
+        }
+        self.editor.grab_focus();
+    }
+
+    fn refresh_slash(&self, may_open: bool) {
+        let buffer = self.editor.buffer();
+        let editable = {
+            let s = self.state.borrow();
+            s.active
+                .as_ref()
+                .and_then(|id| s.drafts.get(id))
+                .is_some_and(|d| !d.note().deleted)
+        };
+        if !editable || !self.editor.is_editable() || !self.editor.has_focus() {
+            self.slash.close();
+            self.selection_due.set(None);
+            return;
+        }
+        let selection = buffer
+            .selection_bounds()
+            .map(|(a, b)| a.offset() as usize..b.offset() as usize);
+        if self.slash.observe_selection(selection.clone()) {
+            // Wait for the selection to settle, so the popup never interrupts
+            // dragging or a sequence of Shift+arrow presses.
+            self.selection_due.set(
+                selection
+                    .as_ref()
+                    .map(|_| Instant::now() + Duration::from_millis(150)),
+            );
+        }
+        if selection.is_some() {
+            if self
+                .selection_due
+                .get()
+                .is_some_and(|due| due <= Instant::now())
+            {
+                let dragging = self
+                    .editor
+                    .display()
+                    .default_seat()
+                    .and_then(|seat| seat.pointer())
+                    .is_some_and(|pointer| {
+                        pointer
+                            .modifier_state()
+                            .contains(gdk::ModifierType::BUTTON1_MASK)
+                    });
+                if !dragging {
+                    self.selection_due.set(None);
+                    self.slash.show_selection(&self.editor);
+                }
+            }
+            return;
+        }
+        if !may_open && !self.slash.popover.is_visible() {
+            return;
+        }
+        let source = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        let Some(query) = slash_menu::query(&source, buffer.cursor_position() as usize) else {
+            self.slash.close();
+            return;
+        };
+        let moved = self
+            .slash
+            .query
+            .borrow()
+            .as_ref()
+            .is_some_and(|old| old.start != query.start);
+        let code = self.state.borrow().document.spans.iter().any(|span| {
+            matches!(span.style, "code" | "code-block")
+                && span.range.contains(&(query.start as i32))
+        });
+        if (!may_open && moved) || code {
+            self.slash.close();
+            return;
+        }
+        self.slash.show(query, &self.editor);
+    }
+
+    fn dismiss_format_menu(&self) {
+        let buffer = self.editor.buffer();
+        self.slash.observe_selection(
+            buffer
+                .selection_bounds()
+                .map(|(a, b)| a.offset() as usize..b.offset() as usize),
+        );
+        self.slash.close();
+        self.selection_due.set(None);
+    }
+
+    fn slash_key(&self, key: gdk::Key) -> bool {
+        if !self.slash.popover.is_visible() {
+            if key == gdk::Key::Escape && self.selection_due.get().is_some() {
+                self.dismiss_format_menu();
+                return true;
+            }
+            return false;
+        }
+        match key {
+            gdk::Key::Escape => self.slash.close(),
+            gdk::Key::Up => self.slash.move_selection(-1),
+            gdk::Key::Down => self.slash.move_selection(1),
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Tab => {
+                if let Some(action) = self.slash.selected() {
+                    self.run_menu_action(action);
+                } else {
+                    self.slash.close();
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn run_menu_action(&self, action: MenuAction) {
+        if !self.editor.is_editable() {
+            self.slash.close();
+            return;
+        }
+        let selection = self.slash.selection.borrow().clone();
+        if let Some(selection) = selection {
+            let buffer = self.editor.buffer();
+            let current = buffer
+                .selection_bounds()
+                .map(|(a, b)| a.offset() as usize..b.offset() as usize);
+            if current.as_ref() != Some(&selection) {
+                self.dismiss_format_menu();
+                return;
+            }
+            match action {
+                MenuAction::Inline(format) => self.format_selection(format),
+                MenuAction::Block(block) => {
+                    let Some(id) = self.state.borrow().active.clone() else {
+                        return;
+                    };
+                    self.finish_rich_edit(&id);
+                    let body = self.state.borrow().pages[&id].body.clone();
+                    if let Some(edit) = formatting::selected_blocks(&body, selection, block) {
+                        self.state
+                            .borrow_mut()
+                            .drafts
+                            .get_mut(&id)
+                            .unwrap()
+                            .undo_boundary();
+                        self.replace_source(&id, &buffer, edit);
+                        self.state
+                            .borrow_mut()
+                            .drafts
+                            .get_mut(&id)
+                            .unwrap()
+                            .undo_boundary();
+                        self.dismiss_format_menu();
+                        self.render_now(&id);
+                    }
+                }
+            }
+            self.dismiss_format_menu();
+            self.editor.grab_focus();
+        } else if let MenuAction::Block(block) = action {
+            self.run_slash_command(block);
+        }
+    }
+
+    fn run_slash_command(&self, block: Block) {
+        if !self.editor.is_editable() {
+            return;
+        }
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        self.finish_rich_edit(&id);
+        let Some(query) = self.slash.query.borrow().clone() else {
+            return;
+        };
+        let buffer = self.editor.buffer();
+        let body = self.state.borrow().pages[&id].body.clone();
+        if buffer.has_selection()
+            || slash_menu::query(&body, buffer.cursor_position() as usize).as_ref() != Some(&query)
+        {
+            self.slash.close();
+            return;
+        }
+        let old_len = body.chars().count();
+        let Some(deletion) = formatting::delete(&body, query.start..query.end) else {
+            self.slash.close();
+            return;
+        };
+        let mut chars: Vec<_> = deletion.text.chars().collect();
+        let Some(edit) = formatting::block(&deletion.text, deletion.selection.start, block) else {
+            self.slash.close();
+            return;
+        };
+        chars.splice(edit.range, edit.text.chars());
+        self.slash.close();
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(&id)
+            .unwrap()
+            .undo_boundary();
+        self.replace_source(
+            &id,
+            &buffer,
+            formatting::Edit {
+                range: 0..old_len,
+                text: chars.iter().collect(),
+                selection: edit.selection,
+            },
+        );
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(&id)
+            .unwrap()
+            .undo_boundary();
+        self.render_now(&id);
+        self.editor.grab_focus();
+        self.editor.scroll_mark_onscreen(&buffer.get_insert());
+    }
+
+    fn delete_visible(&self, backwards: bool) {
+        if !self.editor.is_editable() {
+            return;
+        }
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        self.finish_rich_edit(&id);
+        let buffer = self.editor.buffer();
+        let (mut start, mut end) = buffer.selection_bounds().unwrap_or_else(|| {
+            let cursor = buffer.iter_at_mark(&buffer.get_insert());
+            let mut other = cursor;
+            if backwards {
+                other.backward_visible_cursor_position();
+                (other, cursor)
+            } else {
+                other.forward_visible_cursor_position();
+                (cursor, other)
+            }
+        });
+        buffer.begin_user_action();
+        buffer.delete(&mut start, &mut end);
+        buffer.end_user_action();
     }
 
     /// Writes a draft's changes from an import or undo into its buffer.
@@ -1243,12 +1737,20 @@ impl Ui {
         }
         self.from_doc.set(false);
         self.text_changed(id, buffer);
+        if *buffer == self.editor.buffer() {
+            self.dismiss_format_menu();
+        }
+        self.render_now(id);
         applied.cursor.map(|cursor| cursor as i32)
     }
 
     fn undo_redo(&self, undo: bool) {
         if !self.editor.is_editable() {
             return;
+        }
+        let active = self.state.borrow().active.clone();
+        if let Some(id) = active {
+            self.finish_rich_edit(&id);
         }
         let target = {
             let mut s = self.state.borrow_mut();
@@ -1290,7 +1792,11 @@ impl Ui {
     fn update_word_count(&self) {
         let s = self.state.borrow();
         if let Some(page) = s.active.as_ref().and_then(|id| s.pages.get(id)) {
-            let count = page.body.split_whitespace().count();
+            let count = page
+                .buffer
+                .text(&page.buffer.start_iter(), &page.buffer.end_iter(), false)
+                .split_whitespace()
+                .count();
             self.words.set_text(&format!(
                 "{count} {}",
                 if count == 1 { "word" } else { "words" }
@@ -1400,14 +1906,7 @@ impl Ui {
         if s.parsed_generation != s.parse_generation {
             return;
         }
-        let selection = buffer
-            .selection_bounds()
-            .map(|(a, b)| a.offset()..b.offset())
-            .unwrap_or_else(|| {
-                let p = buffer.cursor_position();
-                p..p
-            });
-        let target = s.document.hidden_outside(selection);
+        let target = s.document.hidden.clone();
         if target == s.hidden_applied {
             return;
         }
@@ -1452,6 +1951,17 @@ impl Ui {
     }
 
     fn tick(self: &Rc<Self>) {
+        let pending: Vec<_> = self
+            .state
+            .borrow()
+            .pages
+            .iter()
+            .filter(|(_, page)| page.before_edit.is_some())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in pending {
+            self.finish_rich_edit(&id);
+        }
         if self.editor.left_margin() != ((self.editor.width() - 720) / 2).max(48) {
             self.update_writing_margins();
         }
@@ -1463,17 +1973,10 @@ impl Ui {
             self.update_sync_button();
             self.update_sync_dialog();
         }
-        while let Ok((generation, document)) = self.parse_results.try_recv() {
-            if generation == self.state.borrow().parse_generation {
-                {
-                    let mut s = self.state.borrow_mut();
-                    s.document = document;
-                    s.parsed_generation = generation;
-                }
-                self.apply_document();
-            }
-        }
         let now = Instant::now();
+        if self.selection_due.get().is_some_and(|due| due <= now) {
+            self.refresh_slash(false);
+        }
         if now.duration_since(self.dates_updated.get()) >= Duration::from_secs(60) {
             for item in self
                 .note_items
@@ -1493,14 +1996,6 @@ impl Ui {
             let mut s = self.state.borrow_mut();
             for command in s.drafts.due(now) {
                 self.send(command);
-            }
-            if s.parse_due.is_some_and(|due| due <= now) {
-                s.parse_due = None;
-                if let Some(page) = s.active.as_ref().and_then(|id| s.pages.get(id)) {
-                    let _ = self
-                        .parse_requests
-                        .send((s.parse_generation, page.body.clone()));
-                }
             }
         }
         if now.duration_since(self.prefs_due.get()) >= Duration::from_secs(2) {
@@ -2246,7 +2741,14 @@ fn wrapped_label(text: &str, class: &str) -> gtk::Label {
 
 fn configure_tags(buffer: &gtk::TextBuffer) {
     let table = buffer.tag_table();
-    for (name, scale) in [("h1", 1.875), ("h2", 1.3), ("h3", 1.12)] {
+    for (name, scale) in [
+        ("h1", 1.875),
+        ("h2", 1.5),
+        ("h3", 1.25),
+        ("h4", 1.12),
+        ("h5", 1.0),
+        ("h6", 0.94),
+    ] {
         table.add(
             &gtk::TextTag::builder()
                 .name(name)
@@ -2461,7 +2963,7 @@ mod tests {
             settings.set_gtk_application_prefer_dark_theme(false);
         }
         buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
-        assert!(!buffer.start_iter().has_tag(&hidden));
+        assert!(buffer.start_iter().has_tag(&hidden));
         ui.editor.emit_by_name::<()>("copy-clipboard", &[]);
         let clipboard = Rc::new(RefCell::new(None));
         let result = clipboard.clone();
@@ -2471,13 +2973,8 @@ mod tests {
                 *result.borrow_mut() = Some(text.unwrap().unwrap().to_string())
             });
         pump_until(|| clipboard.borrow().is_some());
-        assert!(
-            clipboard
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .contains("**A thought**")
-        );
+        assert!(clipboard.borrow().as_ref().unwrap().contains("A thought"));
+        assert!(!clipboard.borrow().as_ref().unwrap().contains("**"));
         buffer.place_cursor(&buffer.end_iter());
         // Typing after a pause starts a new undo step.
         let wait = Instant::now() + Duration::from_millis(UNDO_MERGE_MS as u64 + 50);
@@ -2717,6 +3214,9 @@ mod tests {
         assert!(preferences.cursor > 0);
         deletion_navigation(&app);
         click_below_hidden_last_line(&app);
+        rich_text_workflow(&app);
+        slash_command_workflow(&app);
+        selection_menu_workflow(&app);
         sync_with_another_device(&app);
         if std::env::var_os("NOTEBOOK_BENCH_UI").is_some() {
             benchmark_ui(&app);
@@ -2724,6 +3224,478 @@ mod tests {
         if let Some(directory) = std::env::var_os("NOTEBOOK_TEST_SCREENSHOTS") {
             design_preview(&app, std::path::Path::new(&directory));
         }
+    }
+
+    fn slash_command_workflow(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slash.db");
+        let ui = test_ui(app, path.clone());
+        pump_until(|| ui.state.borrow().ready && ui.editor.has_focus());
+        let id = ui.state.borrow().active.clone().unwrap();
+        let buffer = ui.editor.buffer();
+        let source = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        let visible = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string()
+        };
+        let type_text = |text: &str| {
+            buffer.begin_user_action();
+            buffer.insert_at_cursor(text);
+            buffer.end_user_action();
+        };
+        type_text("/");
+        assert!(ui.slash.popover.is_visible());
+        assert_eq!(ui.slash.selected(), Some(MenuAction::Block(Block::Text)));
+        assert!(ui.editor.has_focus(), "typing stays in the editor");
+        assert!(ui.slash_key(gdk::Key::Down));
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(1)))
+        );
+        type_text("h2");
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(2)))
+        );
+        assert!(ui.slash_key(gdk::Key::Return));
+        assert!(!ui.slash.popover.is_visible());
+        assert_eq!(source(), "## ");
+        assert_eq!(visible(), "");
+        type_text("Section 🌿");
+        assert_eq!(visible(), "Section 🌿");
+        assert!(
+            buffer
+                .iter_at_offset(3)
+                .has_tag(&buffer.tag_table().lookup("h2").unwrap())
+        );
+        type_text("\n/h6");
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(6)))
+        );
+        activate_menu_row(&ui, MenuAction::Block(Block::Heading(6)));
+        assert!(source().ends_with("\n###### "));
+        ui.undo_redo(true);
+        assert!(source().ends_with("\n/h6"));
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "undo doesn't reopen a dismissed command"
+        );
+        ui.undo_redo(false);
+        type_text("Small heading\n/todo");
+        assert_eq!(ui.slash.selected(), Some(MenuAction::Block(Block::Tasks)));
+        ui.slash_key(gdk::Key::Tab);
+        type_text("Check this");
+        assert!(source().ends_with("- [ ] Check this"));
+        assert!(ui.continue_list());
+        assert!(source().ends_with("\n- [ ] "));
+        assert!(ui.continue_list());
+        type_text("**Bold**");
+        buffer.place_cursor(&buffer.iter_at_offset(buffer.char_count() - 2));
+        type_text(" /h4");
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(4)))
+        );
+        ui.slash_key(gdk::Key::Return);
+        assert!(source().ends_with("#### **Bold** "));
+        assert!(visible().ends_with("Bold "));
+        type_text("/text");
+        ui.slash_key(gdk::Key::Return);
+        assert!(source().ends_with("\n**Bold** "));
+        type_text("\n/heading");
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(1)))
+        );
+        ui.slash_key(gdk::Key::Down);
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(2)))
+        );
+        ui.slash_key(gdk::Key::Up);
+        assert_eq!(
+            ui.slash.selected(),
+            Some(MenuAction::Block(Block::Heading(1)))
+        );
+        ui.slash_key(gdk::Key::Escape);
+        let cancelled = source();
+        assert!(cancelled.ends_with("/heading"));
+        type_text(" ordinary");
+        assert!(!ui.slash.popover.is_visible());
+        type_text("\n/unknown");
+        assert!(ui.slash.popover.is_visible());
+        assert_eq!(ui.slash.selected(), None);
+        assert!(!ui.slash_key(gdk::Key::Return));
+        type_text("\nhttps://example.org/path");
+        assert!(!ui.slash.popover.is_visible());
+        type_text("\n```\n/h2");
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "code never triggers commands"
+        );
+        type_text("\n```\n/");
+        assert!(ui.slash.popover.is_visible());
+        buffer.place_cursor(&buffer.start_iter());
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "moving away dismisses the menu"
+        );
+        buffer.place_cursor(&buffer.end_iter());
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "moving back doesn't reopen it"
+        );
+        type_text(" /");
+        assert!(ui.slash.popover.is_visible());
+        if let Some(directory) = std::env::var_os("NOTEBOOK_TEST_SCREENSHOTS") {
+            let directory = std::path::PathBuf::from(directory);
+            let wait = Instant::now() + Duration::from_millis(150);
+            pump_until(|| Instant::now() >= wait);
+            let paintable = gtk::WidgetPaintable::new(Some(&ui.slash.popover));
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(
+                &snapshot,
+                ui.slash.popover.width() as f64,
+                ui.slash.popover.height() as f64,
+            );
+            let texture = ui
+                .window
+                .renderer()
+                .unwrap()
+                .render_texture(snapshot.to_node().unwrap(), None);
+            texture
+                .save_to_png(directory.join("slash-menu.png"))
+                .unwrap();
+        }
+        ui.new_note();
+        assert!(!ui.slash.popover.is_visible());
+        ui.open_note(&id);
+        assert_eq!(source(), draft(&ui, &id).text());
+        ui.flush_drafts();
+        pump_until(|| !draft(&ui, &id).has_unsaved());
+        let saved = source();
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+        let mut repo = storage::Repository::open(&path).unwrap();
+        assert_eq!(repo.bootstrap().unwrap().1.body, saved);
+    }
+
+    fn selection_menu_workflow(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selection.db");
+        let ui = test_ui(app, path.clone());
+        pump_until(|| ui.state.borrow().ready && ui.editor.has_focus());
+        let id = ui.state.borrow().active.clone().unwrap();
+        let buffer = ui.editor.buffer();
+        let source = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        let visible = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string()
+        };
+        let select = |start, end| {
+            buffer.place_cursor(&buffer.iter_at_offset(start));
+            // Let X11 process the old primary selection before simulating a
+            // separate user gesture that selects text again.
+            let settled = Instant::now() + Duration::from_millis(20);
+            pump_until(|| Instant::now() >= settled);
+            buffer.select_range(&buffer.iter_at_offset(end), &buffer.iter_at_offset(start));
+            pump_until(|| ui.slash.popover.is_visible());
+            assert!(
+                ui.editor.has_focus(),
+                "selection menu keeps the editor focused"
+            );
+            assert!(ui.slash.query.borrow().is_none());
+        };
+        buffer.begin_user_action();
+        buffer.insert_at_cursor("Hello 🌿 world\nSecond line\nUntouched");
+        buffer.end_user_action();
+        select(0, 7);
+        assert_eq!(ui.slash.selected(), Some(MenuAction::Inline(Format::Bold)));
+        activate_menu_row(&ui, MenuAction::Inline(Format::Bold));
+        assert_eq!(source(), "**Hello 🌿** world\nSecond line\nUntouched");
+        assert_eq!(visible(), "Hello 🌿 world\nSecond line\nUntouched");
+        assert!(
+            buffer.has_selection(),
+            "clicking the menu preserves selected text"
+        );
+        assert!(!ui.slash.popover.is_visible());
+        ui.refresh_slash(false);
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "applying doesn't reopen the menu"
+        );
+        ui.undo_redo(true);
+        assert_eq!(source(), "Hello 🌿 world\nSecond line\nUntouched");
+        ui.undo_redo(false);
+        assert_eq!(source(), "**Hello 🌿** world\nSecond line\nUntouched");
+        // Toggle existing formatting off through the selection menu.
+        select(2, 9);
+        activate_menu_row(&ui, MenuAction::Inline(Format::Bold));
+        assert_eq!(source(), "Hello 🌿 world\nSecond line\nUntouched");
+        for (format, expected) in [
+            (Format::Italic, "*Hello 🌿* world\nSecond line\nUntouched"),
+            (Format::Strike, "~~Hello 🌿~~ world\nSecond line\nUntouched"),
+        ] {
+            select(0, 7);
+            activate_menu_row(&ui, MenuAction::Inline(format));
+            assert_eq!(source(), expected);
+            assert_eq!(visible(), "Hello 🌿 world\nSecond line\nUntouched");
+            ui.undo_redo(true);
+        }
+        // Selection ends precisely at the third line's start.
+        select(2, 26);
+        activate_menu_row(&ui, MenuAction::Block(Block::Heading(3)));
+        assert_eq!(source(), "### Hello 🌿 world\n### Second line\nUntouched");
+        assert_eq!(visible(), "Hello 🌿 world\nSecond line\nUntouched");
+        assert_eq!(
+            buffer
+                .selection_bounds()
+                .map(|(a, b)| a.offset()..b.offset()),
+            Some(6..34)
+        );
+        ui.undo_redo(true);
+        select(0, 26);
+        activate_menu_row(&ui, MenuAction::Block(Block::Numbers));
+        assert_eq!(source(), "1. Hello 🌿 world\n2. Second line\nUntouched");
+        ui.undo_redo(true);
+        select(0, 7);
+        let before = source();
+        assert!(ui.slash_key(gdk::Key::Escape));
+        ui.render_now(&id);
+        assert_eq!(source(), before);
+        assert!(!ui.slash.popover.is_visible(), "Escape stays dismissed");
+        assert!(buffer.has_selection());
+        // Extending a selection shows the menu again; collapsing hides it.
+        buffer.select_range(&buffer.iter_at_offset(8), &buffer.start_iter());
+        pump_until(|| ui.slash.popover.is_visible());
+        buffer.place_cursor(&buffer.start_iter());
+        assert!(!ui.slash.popover.is_visible());
+        select(0, 7);
+        buffer.begin_user_action();
+        buffer.delete_selection(true, true);
+        buffer.insert_at_cursor("New");
+        buffer.end_user_action();
+        assert_eq!(source(), "New world\nSecond line\nUntouched");
+        assert!(!ui.slash.popover.is_visible());
+        ui.undo_redo(true);
+        select(0, 7);
+        ui.editor.set_editable(false);
+        ui.refresh_slash(false);
+        assert!(!ui.slash.popover.is_visible());
+        let before = source();
+        ui.run_menu_action(MenuAction::Block(Block::Heading(1)));
+        assert_eq!(source(), before, "read-only selection can't change text");
+        ui.editor.set_editable(true);
+        select(0, 7);
+        ui.search.grab_focus();
+        assert!(!ui.slash.popover.is_visible());
+        ui.editor.grab_focus();
+        ui.refresh_slash(false);
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "returning focus doesn't reopen it"
+        );
+        select(0, 7);
+        if let Some(directory) = std::env::var_os("NOTEBOOK_TEST_SCREENSHOTS") {
+            let wait = Instant::now() + Duration::from_millis(150);
+            pump_until(|| Instant::now() >= wait);
+            let paintable = gtk::WidgetPaintable::new(Some(&ui.slash.popover));
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(
+                &snapshot,
+                ui.slash.popover.width() as f64,
+                ui.slash.popover.height() as f64,
+            );
+            ui.window
+                .renderer()
+                .unwrap()
+                .render_texture(snapshot.to_node().unwrap(), None)
+                .save_to_png(std::path::Path::new(&directory).join("selection-menu.png"))
+                .unwrap();
+        }
+        ui.new_note();
+        assert!(!ui.slash.popover.is_visible());
+        ui.open_note(&id);
+        assert!(
+            !ui.slash.popover.is_visible(),
+            "switching notes never restores a stale menu"
+        );
+        assert_eq!(source(), draft(&ui, &id).text());
+        ui.flush_drafts();
+        pump_until(|| !draft(&ui, &id).has_unsaved());
+        let saved = source();
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+        let mut repo = storage::Repository::open(&path).unwrap();
+        assert_eq!(repo.bootstrap().unwrap().1.body, saved);
+    }
+
+    // Exercise native pointer activation when running under the test X server.
+    fn activate_menu_row(ui: &Ui, action: MenuAction) {
+        for _ in 0..slash_menu::COMMANDS.len() {
+            if ui.slash.selected() == Some(action) {
+                break;
+            }
+            ui.slash.move_selection(1);
+        }
+        assert_eq!(ui.slash.selected(), Some(action));
+        let row = ui.slash.list.selected_row().unwrap();
+        if std::env::var_os("NOTEBOOK_TEST_POINTER").is_some() {
+            let wait = Instant::now() + Duration::from_millis(150);
+            pump_until(|| Instant::now() >= wait);
+            let output = std::process::Command::new("xdotool")
+                .args(["search", "--onlyvisible", "--name", ".*"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let windows = String::from_utf8(output.stdout).unwrap();
+            let surface = ui.slash.popover.surface().unwrap();
+            let geometry = windows
+                .lines()
+                .find_map(|window| {
+                    let output = std::process::Command::new("xdotool")
+                        .args(["getwindowgeometry", "--shell", window])
+                        .output()
+                        .unwrap();
+                    let values: HashMap<_, _> = String::from_utf8(output.stdout)
+                        .unwrap()
+                        .lines()
+                        .filter_map(|line| {
+                            let (key, value) = line.split_once('=')?;
+                            Some((key.to_owned(), value.parse::<i32>().ok()?))
+                        })
+                        .collect();
+                    (values.get("WIDTH") == Some(&surface.width())
+                        && values.get("HEIGHT") == Some(&surface.height()))
+                    .then_some(values)
+                })
+                .expect("the popup's native X11 window");
+            let bounds = row.compute_bounds(&ui.slash.popover).unwrap();
+            let (dx, dy) = ui.slash.popover.surface_transform();
+            let x = geometry["X"] + (bounds.x() + bounds.width() / 2.0) as i32 - dx as i32;
+            let y = geometry["Y"] + (bounds.y() + bounds.height() / 2.0) as i32 - dy as i32;
+            assert!(
+                std::process::Command::new("xdotool")
+                    .args(["mousemove", &x.to_string(), &y.to_string(), "click", "1"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            pump_until(|| !ui.slash.popover.is_visible());
+        } else {
+            ui.slash.list.emit_by_name::<()>("row-activated", &[&row]);
+        }
+    }
+
+    fn rich_text_workflow(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rich.db");
+        let ui = test_ui(app, path.clone());
+        pump_until(|| ui.state.borrow().ready);
+        let id = ui.state.borrow().active.clone().unwrap();
+        let buffer = ui.editor.buffer();
+        let source = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        let visible = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string()
+        };
+        buffer.begin_user_action();
+        buffer.insert_at_cursor("Hello 🌿 world");
+        buffer.end_user_action();
+        buffer.select_range(&buffer.iter_at_offset(7), &buffer.iter_at_offset(0));
+        ui.format_selection(Format::Bold);
+        assert_eq!(source(), "**Hello 🌿** world");
+        assert_eq!(visible(), "Hello 🌿 world");
+        assert!(
+            buffer
+                .iter_at_offset(2)
+                .has_tag(&buffer.tag_table().lookup("strong").unwrap())
+        );
+        ui.undo_redo(true);
+        assert_eq!(
+            source(),
+            "Hello 🌿 world",
+            "formatting has its own undo step"
+        );
+        ui.undo_redo(false);
+        assert_eq!(source(), "**Hello 🌿** world");
+        buffer.place_cursor(&buffer.iter_at_offset(9));
+        buffer.begin_user_action();
+        buffer.insert_at_cursor("!");
+        buffer.end_user_action();
+        assert_eq!(visible(), "Hello 🌿! world");
+        assert_eq!(source(), "**Hello 🌿!** world");
+        ui.editor.emit_by_name::<()>("backspace", &[]);
+        assert_eq!(visible(), "Hello 🌿 world");
+        assert_eq!(source(), "**Hello 🌿** world");
+        buffer.place_cursor(&buffer.iter_at_offset(9));
+        buffer.begin_user_action();
+        buffer.insert_at_cursor(" ");
+        buffer.end_user_action();
+        assert_eq!(visible(), "Hello 🌿  world");
+        assert_eq!(source(), "**Hello 🌿**  world");
+        ui.editor.emit_by_name::<()>("backspace", &[]);
+        assert_eq!(source(), "**Hello 🌿** world");
+        // A selection starting outside bold and ending inside it must leave
+        // the unselected text formatted, with no unmatched delimiters.
+        buffer.select_range(&buffer.iter_at_offset(8), &buffer.start_iter());
+        buffer.begin_user_action();
+        buffer.delete_selection(true, true);
+        buffer.insert_at_cursor("New ");
+        buffer.end_user_action();
+        assert_eq!(visible(), "New 🌿 world");
+        assert!(!visible().contains('*'));
+        assert_eq!(draft(&ui, &id).text(), source());
+        buffer.select_range(&buffer.end_iter(), &buffer.start_iter());
+        buffer.begin_user_action();
+        buffer.delete_selection(true, true);
+        buffer.end_user_action();
+        assert_eq!(source(), "");
+        buffer.begin_user_action();
+        buffer.insert_at_cursor("**🌿**");
+        buffer.end_user_action();
+        buffer.place_cursor(&buffer.end_iter());
+        ui.editor.emit_by_name::<()>("backspace", &[]);
+        assert_eq!(
+            source(),
+            "",
+            "backspace after hidden closing syntax deletes the visible character"
+        );
+        ui.format_selection(Format::Bullets);
+        assert_eq!(source(), "- ");
+        buffer.begin_user_action();
+        buffer.insert_at_cursor("First");
+        buffer.end_user_action();
+        assert!(ui.continue_list());
+        assert_eq!(source(), "- First\n- ");
+        assert!(ui.continue_list());
+        assert_eq!(source(), "- First\n");
+        buffer.select_range(&buffer.iter_at_offset(7), &buffer.iter_at_offset(2));
+        ui.format_selection(Format::Italic);
+        assert_eq!(source(), "- *First*\n");
+        assert_eq!(visible(), "- First\n");
+        ui.flush_drafts();
+        pump_until(|| !draft(&ui, &id).has_unsaved());
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+        let mut repo = storage::Repository::open(&path).unwrap();
+        assert_eq!(repo.bootstrap().unwrap().1.body, "- *First*\n");
     }
 
     fn sync_with_another_device(app: &gtk::Application) {

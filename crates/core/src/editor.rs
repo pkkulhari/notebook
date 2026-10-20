@@ -70,6 +70,7 @@ pub struct Draft {
     doc: LoroDoc,
     /// Undoes only this device's edits, even after others' edits arrive.
     undo: UndoManager,
+    separate_undo: bool,
     /// Text changes from imports and undo, waiting to reach the UI.
     incoming: Incoming,
     _subscription: loro::Subscription,
@@ -122,6 +123,7 @@ impl Draft {
             in_flight: vec![],
             doc,
             undo,
+            separate_undo: false,
             incoming,
             _subscription: subscription,
             units,
@@ -179,6 +181,11 @@ impl Draft {
 
     pub fn delete(&mut self, at: usize, len: usize) -> Result<(), OutOfSync> {
         self.replace(at, len, "")
+    }
+
+    /// Keep an explicit formatting command separate from adjacent typing.
+    pub fn undo_boundary(&mut self) {
+        self.separate_undo = true;
     }
 
     /// Replaces `len` units at `at`, recording only the part that actually
@@ -241,8 +248,14 @@ impl Draft {
     }
 
     fn typed(&mut self) {
+        if self.separate_undo {
+            self.undo.set_merge_interval(0);
+        }
         self.doc.set_next_commit_origin(TYPING);
         self.doc.commit();
+        if std::mem::take(&mut self.separate_undo) {
+            self.undo.set_merge_interval(UNDO_MERGE_MS);
+        }
         self.sequence += 1;
         self.changed = Instant::now();
     }
@@ -942,6 +955,23 @@ mod tests {
         assert_eq!(d.sequence, sequence);
         d.insert(4, "!").unwrap();
         assert_eq!(d.text(), "🌿 ok!");
+    }
+
+    #[test]
+    fn formatting_boundaries_separate_actions_from_typing() {
+        let (_dir, _repo, mut drafts, id) = setup(Units::Chars);
+        let d = drafts.get_mut(&id).unwrap();
+        d.insert(0, "hello").unwrap();
+        d.undo_boundary();
+        d.replace(0, 5, "**hello**").unwrap();
+        d.undo_boundary();
+        d.insert(9, "!").unwrap();
+        d.undo().unwrap();
+        assert_eq!(d.text(), "**hello**");
+        d.undo().unwrap();
+        assert_eq!(d.text(), "hello");
+        d.redo().unwrap();
+        assert_eq!(d.text(), "**hello**");
     }
 
     #[test]

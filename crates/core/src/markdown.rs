@@ -88,7 +88,10 @@ pub fn parse(source: &str, units: Units) -> Document {
                 style = Some(match level {
                     pulldown_cmark::HeadingLevel::H1 => "h1",
                     pulldown_cmark::HeadingLevel::H2 => "h2",
-                    _ => "h3",
+                    pulldown_cmark::HeadingLevel::H3 => "h3",
+                    pulldown_cmark::HeadingLevel::H4 => "h4",
+                    pulldown_cmark::HeadingLevel::H5 => "h5",
+                    pulldown_cmark::HeadingLevel::H6 => "h6",
                 });
                 doc.blocks.push(chars(range.clone()));
                 let hashes = text.bytes().take_while(|b| *b == b'#').count();

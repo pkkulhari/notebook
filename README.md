@@ -1,6 +1,6 @@
 # Notebook
 
-A native Linux note-taking app built with Rust and GTK4. Organize your notes into notebooks, write in Markdown, and keep everything on your computer. No account or internet connection required.
+A native Linux note-taking app built with Rust and GTK4. Organize your notes into notebooks, write with a minimal rich text editor, and keep everything on your computer. No account or internet connection required.
 
 An [Android app](#android) shares the same Rust core and syncs with it.
 
@@ -8,7 +8,7 @@ An [Android app](#android) shares the same Rust core and syncs with it.
 
 ## Features
 
-- **Markdown editing** with inline formatting for headings, emphasis, links, lists, task lists, quotes, and code. Markdown syntax appears in the block you're editing.
+- **Rich text editing** that keeps formatting visible while you type. Type `/` for a searchable block menu with Text, headings H1–H6, bulleted and numbered lists, to-do lists, and quotes. Use selection shortcuts or the context menu for bold, italic, and strikethrough.
 - **Notebooks and search** to organize notes and find them by word or word prefix.
 - **Automatic saving** as you write, with your last note and cursor position restored when you reopen the app.
 - **Focus mode** to hide navigation and give your writing more room.
@@ -70,7 +70,9 @@ Create a notebook with the sidebar's **+** button. Use its **⋮** menu to renam
 
 Search finds notes across all notebooks. While viewing **Trash**, search finds deleted notes instead. Restore a trashed note to edit it again.
 
-Markdown is stored as plain text and preserved when copied. **Ctrl+click** opens web and email links. Tables, images, and HTML remain source text.
+Notes are still stored as Markdown for compatibility and sync, but supported formatting markers stay hidden even when you select or edit text. Copying copies the visible text. Type `/` at the start of a line or after a space to open the block menu, then type to filter (for example, `/h2`, `/todo`, or `/quote`). Use ↑/↓ to navigate and Enter or Tab to apply; Escape closes the menu and keeps your typed text. Choosing a command converts the current line and removes the command text. Slashes in URLs, paths, and code do not open the menu.
+
+Selecting text opens the same formatting menu, with bold, italic, strikethrough, headings H1–H6, lists, and quotes. Inline styles apply to the selected text; block styles apply to every selected line. Click a choice or use ↑/↓ and Enter to apply it. Escape or clicking outside closes the menu without applying formatting. Formatting is also available through shortcuts and the right-click menu. List shortcuts work on the current line or selected lines; Enter continues a list, and Enter on an empty item ends it. **Ctrl+click** opens web and email links. Tables, images, and HTML remain source text.
 
 ### Syncing your devices
 
@@ -91,6 +93,11 @@ Devices find each other with mDNS and sync over UDP, so a firewall must allow bo
 | Toggle focus mode | F9 |
 | Save immediately | Ctrl+S |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
+| Open block menu / filter commands | Type `/` |
+| Navigate / apply / close block menu | ↑↓ / Enter or Tab / Escape |
+| Bold / italic (selected text) | Ctrl+B / Ctrl+I |
+| Strikethrough (selected text) | Ctrl+Shift+X |
+| Bulleted / numbered list | Ctrl+Shift+7 / Ctrl+Shift+8 |
 | Trash / restore note | Ctrl+Shift+Delete |
 | Return focus to editor | Escape |
 
@@ -131,7 +138,7 @@ Gradle builds the Rust library and its Kotlin bindings itself; no separate `carg
 
 ### On the phone
 
-The app works like the desktop: notebooks, search, Markdown with syntax shown in the block you're editing, list continuation, trash, and undo that only undoes your own edits. Tap the title to switch notebooks, and the notebook label above a note to move it.
+The phone app includes notebooks, search, list continuation, trash, and undo that only undoes your own edits. Its Markdown editor still shows syntax in the block you're editing; the desktop's slash command editor is currently Linux only. Tap the title to switch notebooks, and the notebook label above a note to move it.
 
 Notes are stored in the app's private storage (`notebook.db`) and are included in Android backups. The sync key lives in a directory Android never backs up, so a phone restored from a backup must be paired again; its notes merge with your other devices' copies without duplicating.
 
