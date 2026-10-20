@@ -1,6 +1,7 @@
 use crate::{
     formatting::{self, Block, Format},
     slash_menu::{self, Action as MenuAction, SlashMenu},
+    task_checkboxes::TaskCheckboxes,
 };
 use gtk::{gdk, gio, glib, pango, prelude::*};
 use notebook_core::{
@@ -91,6 +92,7 @@ pub(crate) struct Ui {
     active_position: Rc<Cell<u32>>,
     selection: gtk::SingleSelection,
     editor: gtk::TextView,
+    task_checkboxes: TaskCheckboxes,
     slash: SlashMenu,
     editor_stack: gtk::Stack,
     placeholder: gtk::Label,
@@ -473,6 +475,7 @@ fn build(
         active_position,
         selection,
         editor,
+        task_checkboxes: TaskCheckboxes::default(),
         slash,
         editor_stack,
         placeholder,
@@ -537,6 +540,19 @@ fn build(
 
 impl Ui {
     fn connect(self: &Rc<Self>, app: &gtk::Application) {
+        let weak = Rc::downgrade(self);
+        self.task_checkboxes
+            .connect_toggled(move |buffer, offset, checked| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_task_checked(buffer, offset, checked);
+                }
+            });
+        let weak = Rc::downgrade(self);
+        self.editor.connect_editable_notify(move |editor| {
+            if let Some(ui) = weak.upgrade() {
+                ui.task_checkboxes.set_editable(editor.is_editable());
+            }
+        });
         let weak = Rc::downgrade(self);
         self.slash.list.connect_row_activated(move |_, row| {
             if let Some(ui) = weak.upgrade()
@@ -790,7 +806,9 @@ impl Ui {
                         | gdk::ModifierType::ALT_MASK,
                 );
             match weak.upgrade() {
-                Some(ui) if plain_enter && ui.continue_list() => glib::Propagation::Stop,
+                Some(ui) if ui.editor.has_focus() && plain_enter && ui.continue_list() => {
+                    glib::Propagation::Stop
+                }
                 _ => glib::Propagation::Proceed,
             }
         });
@@ -1415,7 +1433,8 @@ impl Ui {
         self.updating.set(true);
         let inserted_len = inserted.chars().count();
         buffer.insert(&mut buffer.iter_at_offset(start as i32), &inserted);
-        if buffer.has_selection() && !edit.selection.is_empty() && inserted_len > 0 {
+        if buffer.has_selection() && edit.selection.start != edit.selection.end && inserted_len > 0
+        {
             // Keep the primary selection alive throughout the replacement.
             // Clearing and reclaiming it in one event can make X11 deliver a
             // stale ownership-loss notification that deselects the new text.
@@ -1435,6 +1454,53 @@ impl Ui {
         self.updating.set(false);
         self.from_doc.set(false);
         self.text_changed(id, buffer);
+    }
+
+    fn set_task_checked(&self, buffer: &gtk::TextBuffer, offset: i32, checked: bool) {
+        if !self.editor.is_editable() || *buffer != self.editor.buffer() {
+            return;
+        }
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        self.finish_rich_edit(&id);
+        // Reparse pending edits before trusting a widget's location. This also
+        // prevents an obsolete control from changing ordinary text or code.
+        self.render_now(&id);
+        let is_task = self
+            .state
+            .borrow()
+            .document
+            .spans
+            .iter()
+            .any(|span| span.range.start == offset && matches!(span.style, "task" | "checked"));
+        if !is_task {
+            return;
+        }
+        let cursor = buffer.cursor_position() as usize;
+        let bound = buffer.iter_at_mark(&buffer.selection_bound()).offset() as usize;
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(&id)
+            .unwrap()
+            .undo_boundary();
+        self.replace_source(
+            &id,
+            buffer,
+            formatting::Edit {
+                range: offset as usize + 1..offset as usize + 2,
+                text: if checked { "x" } else { " " }.into(),
+                selection: bound..cursor,
+            },
+        );
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(&id)
+            .unwrap()
+            .undo_boundary();
+        self.render_now(&id);
     }
 
     fn format_selection(&self, format: Format) {
@@ -1820,8 +1886,11 @@ impl Ui {
                 &buffer.iter_at_offset(span.range.end),
             );
         }
+        self.task_checkboxes
+            .sync(&self.editor, &self.state.borrow().document);
         self.apply_hanging_indents();
         self.update_hidden();
+        self.task_checkboxes.place(&self.editor);
     }
 
     fn continue_list(&self) -> bool {
@@ -1883,7 +1952,11 @@ impl Ui {
                 self.editor.iter_location(&end),
             );
             let width = to.x() - from.x();
-            if width <= 0 || to.y() != from.y() {
+            let mut display_start = end;
+            if !self.editor.starts_display_line(&display_start) {
+                self.editor.backward_display_line_start(&mut display_start);
+            }
+            if width <= 0 || display_start.offset() > start.offset() {
                 continue;
             }
             let name = format!("hang-{width}");
@@ -1965,6 +2038,7 @@ impl Ui {
         if self.editor.left_margin() != ((self.editor.width() - 720) / 2).max(48) {
             self.update_writing_margins();
         }
+        self.task_checkboxes.place(&self.editor);
         while let Ok(event) = self.events.try_recv() {
             self.handle(event);
         }
@@ -2806,17 +2880,30 @@ fn configure_tags(buffer: &gtk::TextBuffer) {
             .underline(pango::Underline::Single)
             .build(),
     );
+    // The opaque native checkbox covers these markers while their measured
+    // width reserves space in the text layout.
     table.add(
         &gtk::TextTag::builder()
             .name("task")
             .family("monospace")
+            .scale(0.8)
+            .allow_breaks(false)
             .build(),
     );
     table.add(
         &gtk::TextTag::builder()
             .name("checked")
             .family("monospace")
-            .strikethrough(true)
+            .scale(0.8)
+            .allow_breaks(false)
+            .build(),
+    );
+    // Collapse the unordered bullet without invisible runs: older GTK
+    // versions misreport iterator geometry after hidden text on the line.
+    table.add(
+        &gtk::TextTag::builder()
+            .name("task-bullet")
+            .scale(0.0)
             .build(),
     );
     table.add(
@@ -3215,6 +3302,8 @@ mod tests {
         deletion_navigation(&app);
         click_below_hidden_last_line(&app);
         rich_text_workflow(&app);
+        task_checkbox_workflow(&app);
+        task_checkbox_deletion_workflow(&app);
         slash_command_workflow(&app);
         selection_menu_workflow(&app);
         sync_with_another_device(&app);
@@ -3598,6 +3687,263 @@ mod tests {
         }
     }
 
+    fn task_checkbox_workflow(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.db");
+        let ui = test_ui(app, path.clone());
+        pump_until(|| ui.state.borrow().ready);
+        let id = ui.state.borrow().active.clone().unwrap();
+        let buffer = ui.editor.buffer();
+        let original = "# Tasks 🌿\n\n- [ ] Buy groceries\n  * [x] Nested task\n+ [X] Completed task\n\n1. [ ] Numbered task\n\n`- [ ] inline code`\n\n```\n- [ ] fenced code\n```\n\n[ ] Ordinary text";
+        buffer.begin_user_action();
+        buffer.insert_at_cursor(original);
+        buffer.end_user_action();
+        let source = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        let buttons = || ui.task_checkboxes.buttons();
+        let wait = Instant::now() + Duration::from_millis(100);
+        pump_until(|| Instant::now() >= wait);
+        let controls = buttons();
+        assert_eq!(controls.len(), 4, "code and plain text are not task items");
+        assert_eq!(
+            controls.iter().map(|b| b.is_active()).collect::<Vec<_>>(),
+            [false, true, true, false]
+        );
+        assert_eq!(source(), original, "rendering preserves Markdown");
+        assert_eq!(draft(&ui, &id).text(), original);
+        let first = controls[0].clone();
+        let cursor = buffer.cursor_position();
+        first.grab_focus();
+        let checked = original.replacen("[ ]", "[x]", 1);
+        if std::env::var_os("NOTEBOOK_TEST_POINTER").is_some() {
+            let output = std::process::Command::new("xdotool")
+                .args(["search", "--onlyvisible", "--name", "^Notebook$"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let windows = String::from_utf8(output.stdout).unwrap();
+            let window = windows.lines().last().unwrap();
+            let bounds = first.compute_bounds(&ui.window).unwrap();
+            let x = (bounds.x() + bounds.width() / 2.0) as i32;
+            let y = (bounds.y() + bounds.height() / 2.0) as i32;
+            assert!(
+                std::process::Command::new("xdotool")
+                    .args([
+                        "mousemove",
+                        "--window",
+                        window,
+                        &x.to_string(),
+                        &y.to_string(),
+                        "click",
+                        "1"
+                    ])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            pump_until(|| source() == checked);
+        } else {
+            first.emit_by_name::<()>("activate", &[]);
+        }
+        assert_eq!(source(), checked);
+        assert_eq!(draft(&ui, &id).text(), checked);
+        assert_eq!(buffer.cursor_position(), cursor);
+        assert!(first.has_focus(), "re-rendering retains keyboard focus");
+        assert!(first.is_active());
+        ui.undo_redo(true);
+        assert_eq!(source(), original, "a toggle has its own undo step");
+        assert!(!first.is_active());
+        ui.undo_redo(false);
+        assert_eq!(source(), checked);
+        assert!(first.is_active());
+
+        // A widget follows source edits, including non-ASCII character offsets.
+        buffer.begin_user_action();
+        buffer.insert(&mut buffer.start_iter(), "🌿\n\n");
+        buffer.end_user_action();
+        if std::env::var_os("NOTEBOOK_TEST_POINTER").is_some() {
+            first.grab_focus();
+            assert!(
+                std::process::Command::new("xdotool")
+                    .args(["key", "space"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            pump_until(|| !first.is_active());
+        } else {
+            first.emit_by_name::<()>("activate", &[]);
+        }
+        assert_eq!(source(), format!("🌿\n\n{original}"));
+        if std::env::var_os("NOTEBOOK_TEST_POINTER").is_some() {
+            let line_end = source().find("\n  *").unwrap();
+            let at = source()[..line_end].chars().count() as i32;
+            buffer.place_cursor(&buffer.iter_at_offset(at));
+            first.grab_focus();
+            for checked in [true, false] {
+                assert!(
+                    std::process::Command::new("xdotool")
+                        .args(["key", "Return"])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                pump_until(|| first.is_active() == checked);
+            }
+            assert_eq!(source(), format!("🌿\n\n{original}"));
+            assert_eq!(buffer.cursor_position(), at);
+        }
+        // Preserve a backwards selection when checking a different item.
+        buffer.select_range(&buffer.iter_at_offset(4), &buffer.iter_at_offset(9));
+        controls[2].emit_by_name::<()>("activate", &[]);
+        assert_eq!(buffer.cursor_position(), 4);
+        assert_eq!(buffer.iter_at_mark(&buffer.selection_bound()).offset(), 9);
+        assert!(source().contains("+ [ ] Completed task"));
+        ui.flush_drafts();
+        pump_until(|| !draft(&ui, &id).has_unsaved());
+        let saved = source();
+
+        ui.new_note();
+        assert!(buttons().is_empty(), "controls belong to the active note");
+        assert!(controls.iter().all(|button| button.parent().is_none()));
+        first.emit_by_name::<()>("activate", &[]);
+        assert!(
+            ui.editor
+                .buffer()
+                .text(
+                    &ui.editor.buffer().start_iter(),
+                    &ui.editor.buffer().end_iter(),
+                    true
+                )
+                .is_empty()
+        );
+        ui.open_note(&id);
+        pump_until(|| ui.state.borrow().active.as_deref() == Some(&id));
+        assert_eq!(buttons().len(), 4);
+        ui.trash_or_restore();
+        pump_until(|| ui.state.borrow().active.as_deref() != Some(&id));
+        ui.open_note(&id);
+        pump_until(|| ui.state.borrow().active.as_deref() == Some(&id));
+        assert!(buttons().iter().all(|button| !button.is_sensitive()));
+        ui.trash_or_restore();
+        pump_until(|| ui.editor.is_editable());
+        assert!(buttons().iter().all(|button| button.is_sensitive()));
+        if let Some(directory) = std::env::var_os("NOTEBOOK_TEST_SCREENSHOTS") {
+            let settings = gtk::Settings::default().unwrap();
+            for (dark, name) in [(false, "tasks-light.png"), (true, "tasks-dark.png")] {
+                settings.set_gtk_application_prefer_dark_theme(dark);
+                let wait = Instant::now() + Duration::from_millis(100);
+                pump_until(|| Instant::now() >= wait);
+                screenshot(&ui, &std::path::Path::new(&directory).join(name));
+            }
+            settings.set_gtk_application_prefer_dark_theme(false);
+        }
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+        let repo = storage::Repository::open(&path).unwrap();
+        assert_eq!(repo.load(&id).unwrap().unwrap().body, saved);
+    }
+
+    fn task_checkbox_deletion_workflow(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task-deletion.db");
+        let ui = test_ui(app, path.clone());
+        pump_until(|| ui.state.borrow().ready);
+        let id = ui.state.borrow().active.clone().unwrap();
+        let buffer = ui.editor.buffer();
+        let source = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        let completed = "- [x] Tune PID gains for new actuator firmware";
+        buffer.begin_user_action();
+        buffer.insert_at_cursor(completed);
+        buffer.end_user_action();
+        assert!(ui.continue_list());
+        let before = format!("{completed}\n- [ ] ");
+        assert_eq!(source(), before);
+        assert_eq!(ui.task_checkboxes.buttons().len(), 2);
+        ui.state
+            .borrow_mut()
+            .drafts
+            .get_mut(&id)
+            .unwrap()
+            .undo_boundary();
+        ui.editor.grab_focus();
+        if std::env::var_os("NOTEBOOK_TEST_POINTER").is_some() {
+            assert!(
+                std::process::Command::new("xdotool")
+                    .args(["key", "BackSpace"])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            pump_until(|| source() != before);
+        } else {
+            ui.editor.emit_by_name::<()>("backspace", &[]);
+        }
+        let after = format!("{completed}\n");
+        assert_eq!(
+            source(),
+            after,
+            "one Backspace removes the entire empty checkbox"
+        );
+        assert_eq!(draft(&ui, &id).text(), after);
+        assert_eq!(buffer.cursor_position() as usize, after.chars().count());
+        assert_eq!(ui.task_checkboxes.buttons().len(), 1);
+        ui.undo_redo(true);
+        assert_eq!(source(), before);
+        assert_eq!(ui.task_checkboxes.buttons().len(), 2);
+        ui.undo_redo(false);
+        assert_eq!(source(), after);
+
+        buffer.begin_user_action();
+        buffer.insert_at_cursor("- [ ] 🌿");
+        buffer.end_user_action();
+        ui.editor.emit_by_name::<()>("backspace", &[]);
+        assert_eq!(source(), format!("{after}- [ ] "));
+        ui.editor.emit_by_name::<()>("backspace", &[]);
+        assert_eq!(source(), after);
+
+        // Forward Delete and cutting a partial marker also remove it as a unit.
+        for cut in [false, true] {
+            let prefix = source();
+            let start = buffer.char_count();
+            buffer.begin_user_action();
+            buffer.insert_at_cursor("- [X] Keep this text");
+            buffer.end_user_action();
+            if cut {
+                buffer.select_range(
+                    &buffer.iter_at_offset(start + 5),
+                    &buffer.iter_at_offset(start + 4),
+                );
+                ui.editor.emit_by_name::<()>("cut-clipboard", &[]);
+            } else {
+                buffer.place_cursor(&buffer.iter_at_offset(start));
+                ui.editor
+                    .emit_by_name::<()>("delete-from-cursor", &[&gtk::DeleteType::Chars, &1i32]);
+            }
+            assert_eq!(source(), format!("{prefix}Keep this text"));
+            assert_eq!(ui.task_checkboxes.buttons().len(), 1);
+            assert_eq!(draft(&ui, &id).text(), source());
+            buffer.place_cursor(&buffer.end_iter());
+            buffer.begin_user_action();
+            buffer.insert_at_cursor("\n");
+            buffer.end_user_action();
+        }
+        let saved = source();
+        ui.flush_drafts();
+        pump_until(|| !draft(&ui, &id).has_unsaved());
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+        let repo = storage::Repository::open(&path).unwrap();
+        assert_eq!(repo.load(&id).unwrap().unwrap().body, saved);
+    }
+
     fn rich_text_workflow(app: &gtk::Application) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rich.db");
@@ -3951,6 +4297,14 @@ mod tests {
         };
         pump_until(|| wrapped().is_some());
         let wrapped = wrapped().unwrap();
+        if let Some(directory) = std::env::var_os("NOTEBOOK_TEST_SCREENSHOTS") {
+            let wait = Instant::now() + Duration::from_millis(100);
+            pump_until(|| Instant::now() >= wait);
+            screenshot(
+                ui,
+                &std::path::Path::new(&directory).join("tasks-wrapping.png"),
+            );
+        }
         assert_eq!(wrapped.x(), first.x(), "wrapped task line is not aligned");
         assert_eq!(x("- [ ] Record"), prose, "list item is indented past prose");
         assert_eq!(

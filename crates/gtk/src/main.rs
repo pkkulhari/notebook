@@ -1,6 +1,7 @@
 mod formatting;
 mod slash_menu;
 mod system;
+mod task_checkboxes;
 mod ui;
 
 use gtk::prelude::*;

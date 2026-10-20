@@ -401,7 +401,7 @@ fn list(chars: &[char], selection: Range<usize>, format: Format) -> Option<Edit>
     })
 }
 
-/// Delete what the user selected without leaving half of an invisible pair.
+/// Delete what the user selected without leaving half of a checkbox or an invisible pair.
 /// Partly selected runs keep their delimiters; entirely selected ones lose
 /// both delimiters, including ones just outside the native selection.
 pub fn delete(source: &str, selection: Range<usize>) -> Option<Edit> {
@@ -417,6 +417,24 @@ pub fn delete(source: &str, selection: Range<usize>) -> Option<Edit> {
     let mut remove = vec![false; chars.len()];
     for at in selection.clone() {
         remove[at] = !hidden[at];
+    }
+    // A checkbox replaces the list prefix in the rich text view. Deleting
+    // any part of that prefix (including the gap before the task text) must
+    // remove the whole prefix, not expose a leftover "- [" or "[x".
+    // Item starts exclude nesting indentation and blockquote markers.
+    let mut item_start = 0;
+    for span in &doc.spans {
+        if span.style == "list-item-start" {
+            item_start = span.range.start as usize;
+        } else if matches!(span.style, "task" | "checked") {
+            let mut end = span.range.end as usize;
+            while matches!(chars.get(end), Some(' ' | '\t')) {
+                end += 1;
+            }
+            if selection.start < end && item_start < selection.end {
+                remove[item_start..end].fill(true);
+            }
+        }
     }
     for span in &doc.spans {
         let range = span.range.start as usize..span.range.end as usize;
@@ -775,6 +793,52 @@ mod tests {
             ),
             " **🌿** world"
         );
+    }
+
+    #[test]
+    fn deleting_any_part_of_a_checkbox_removes_the_complete_prefix() {
+        for marker in ["- [ ] ", "* [x] ", "+ [X] ", "12. [ ] ", "3) [x]\t"] {
+            for at in 0..marker.chars().count() {
+                let source = format!("{marker}Keep **🌿 text**");
+                let edit = delete(&source, at..at + 1).unwrap();
+                assert_eq!(edit.selection, 0..0);
+                assert_eq!(
+                    apply(&source, edit),
+                    "Keep **🌿 text**",
+                    "{marker:?} at {at}"
+                );
+            }
+        }
+        for source in ["- [ ] ", "- [x] ", "- [X]\t"] {
+            let end = source.chars().count();
+            assert_eq!(apply(source, delete(source, end - 1..end).unwrap()), "");
+        }
+        let source = "- [x] 🌿 Done\n- [ ] ";
+        let end = source.chars().count();
+        let edit = delete(source, end - 1..end).unwrap();
+        assert_eq!(edit.selection, end - 6..end - 6);
+        assert_eq!(apply(source, edit), "- [x] 🌿 Done\n");
+    }
+
+    #[test]
+    fn checkbox_deletion_preserves_context_and_normal_text_editing() {
+        for (source, selection, expected) in [
+            ("- Parent\n  - [ ] Child", 15..16, "- Parent\n  Child"),
+            ("> - [x] Quoted", 7..8, "> Quoted"),
+            ("- [ ] Text", 6..7, "- [ ] ext"),
+            ("- [x] 🌿", 6..7, "- [x] "),
+            ("- [ ] Text", 4..8, "xt"),
+            ("[ ] Text", 2..3, "[  Text"),
+            ("`- [ ] example`", 5..6, "`- [  example`"),
+            ("```\n- [ ] example\n```", 8..9, "```\n- [  example\n```"),
+        ] {
+            assert_eq!(
+                apply(source, delete(source, selection).unwrap()),
+                expected,
+                "{source:?}"
+            );
+        }
+        assert!(delete("- [ ] **Text**", 6..8).is_none());
     }
 
     #[test]

@@ -74,6 +74,8 @@ Notes are still stored as Markdown for compatibility and sync, but supported for
 
 Selecting text opens the same formatting menu, with bold, italic, strikethrough, headings H1–H6, lists, and quotes. Inline styles apply to the selected text; block styles apply to every selected line. Click a choice or use ↑/↓ and Enter to apply it. Escape or clicking outside closes the menu without applying formatting. Formatting is also available through shortcuts and the right-click menu. List shortcuts work on the current line or selected lines; Enter continues a list, and Enter on an empty item ends it. **Ctrl+click** opens web and email links. Tables, images, and HTML remain source text.
 
+To-do items (`- [ ]` and `- [x]`) display as working checkboxes. Click a checkbox, or focus it and press Space, to mark a task complete or incomplete. Changes save and sync with the note and can be undone with **Ctrl+Z**.
+
 ### Syncing your devices
 
 Sync is off until you turn it on. Open the sync button in the header bar, or **Sync devices** in the menu, and turn on **Sync with your other devices** on each device.
