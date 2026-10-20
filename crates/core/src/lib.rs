@@ -1,5 +1,7 @@
+pub mod commands;
 pub mod crdt;
 pub mod editor;
+pub mod formatting;
 pub mod markdown;
 pub mod model;
 pub mod storage;

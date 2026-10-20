@@ -485,6 +485,11 @@ fn hidden_ranges_never_cross_a_line_break() {
         .map(|r| String::from_utf16(&units[r.start as usize..r.end as usize]).unwrap())
         .collect();
     assert_eq!(hidden, ["===", "**", "**"]);
+    assert_eq!(
+        document.hidden_syntax(),
+        document.hidden_outside(end, end),
+        "rich text hides the same syntax regardless of the active selection"
+    );
     // The cursor in "Next" makes only that paragraph active.
     let next = text.encode_utf16().count() as i32 - 4;
     assert_eq!(
@@ -494,4 +499,21 @@ fn hidden_ranges_never_cross_a_line_break() {
             end: end + 1
         }]
     );
+}
+
+#[test]
+fn all_six_heading_styles_cross_the_android_boundary() {
+    let doc = parse_markdown("# one\n## two\n### three\n#### four\n##### five\n###### six".into());
+    assert_eq!(
+        doc.spans().into_iter().map(|s| s.style).collect::<Vec<_>>(),
+        [
+            Style::H1,
+            Style::H2,
+            Style::H3,
+            Style::H4,
+            Style::H5,
+            Style::H6
+        ]
+    );
+    assert_eq!(doc.hidden_syntax().len(), 6);
 }

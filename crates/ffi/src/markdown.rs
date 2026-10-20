@@ -7,6 +7,9 @@ pub enum Style {
     H1,
     H2,
     H3,
+    H4,
+    H5,
+    H6,
     Strong,
     Emphasis,
     Strike,
@@ -24,8 +27,10 @@ impl Style {
         Some(match name {
             "h1" => Style::H1,
             "h2" => Style::H2,
-            // Keep the phone's existing heading presentation and ABI.
-            "h3" | "h4" | "h5" | "h6" => Style::H3,
+            "h3" => Style::H3,
+            "h4" => Style::H4,
+            "h5" => Style::H5,
+            "h6" => Style::H6,
             "strong" => Style::Strong,
             "emphasis" => Style::Emphasis,
             "strike" => Style::Strike,
@@ -115,13 +120,29 @@ impl MarkdownDocument {
             .collect()
     }
 
+    /// All supported syntax stays hidden, including the active block.
+    pub fn hidden_syntax(&self) -> Vec<TextRange> {
+        self.split_hidden(self.document.hidden.clone())
+    }
+
     /// The Markdown syntax to hide, leaving visible the blocks the selection
     /// from `start` to `end` touches. No range contains a line break: an
     /// Android `ReplacementSpan` can't cross one, so a setext heading's
     /// underline is hidden but its line stays.
     pub fn hidden_outside(&self, start: i32, end: i32) -> Vec<TextRange> {
+        self.split_hidden(self.document.hidden_outside(start..end))
+    }
+
+    /// The link at `position`, if it is safe to open.
+    pub fn link_at(&self, position: i32) -> Option<String> {
+        self.document.link_at(position).map(Into::into)
+    }
+}
+
+impl MarkdownDocument {
+    fn split_hidden(&self, hidden: Vec<std::ops::Range<i32>>) -> Vec<TextRange> {
         let mut ranges = vec![];
-        for hidden in self.document.hidden_outside(start..end) {
+        for hidden in hidden {
             let first = self.line_breaks.partition_point(|&at| at < hidden.start);
             let mut from = hidden.start;
             for &at in self.line_breaks[first..]
@@ -144,12 +165,6 @@ impl MarkdownDocument {
             }
         }
         ranges
-    }
-
-    /// The link at `position`, if it's one the app may open: http, https or
-    /// mailto.
-    pub fn link_at(&self, position: i32) -> Option<String> {
-        self.document.link_at(position).map(Into::into)
     }
 }
 

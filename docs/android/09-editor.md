@@ -7,18 +7,20 @@
 
 The Android editor behaves like the desktop editor:
 
-- Markdown is styled inline, and syntax is hidden outside the block you're editing.
+- Markdown stays rendered while editing and selecting; supported syntax stays hidden.
+- Slash commands and the selection toolbar share the desktop's formatting rules.
+- Tasks have native, focusable checkboxes; toggling them saves, syncs, and undoes.
 - Lists continue when you press Enter.
 - Undo reverts only this device's edits.
 - Edits from other devices appear as they arrive, without moving your cursor.
-- Copying keeps the Markdown source.
+- Copying uses the visible text; storage and sync retain Markdown.
 
 ## The `EditText` subclass
 
 `NoteEditText` extends `android.widget.EditText`:
 
 - `inputType = textMultiLine | textCapSentences | textAutoCorrect`, top gravity, no line limit.
-- `onSelectionChanged` updates the hidden syntax, as described below.
+- `onSelectionChanged` updates the link action and slash menu. Hidden syntax is independent of selection.
 - `onTextContextMenuItem`:
   - Send `android.R.id.undo` and `redo` to the core. This also covers Ctrl+Z from a hardware keyboard. The framework's own undo stack would otherwise disagree with the core's.
   - Map `android.R.id.paste` to `pasteAsPlainText`, so pasted rich text doesn't bring foreign spans.
@@ -40,11 +42,11 @@ This refines step 8's watcher.
 - Parse on one background thread with `parse_markdown(text)`, 80 ms after the last change. The spans to place and the syntax to hide are worked out on that thread too, leaving the main thread only the diff. The desktop uses the same delay (`parse_due` in `crates/gtk/src/ui.rs`).
 - Coalesce requests: while a parse runs, keep only the newest one.
 - Tag each request with a generation number, and apply a result only if the text hasn't changed since.
-- Until the new result arrives, remove the hidden spans on the line being edited, as `text_changed` does on the desktop, so syntax doesn't flicker.
+- Until the new result arrives, keep existing hidden spans in place and move them with the edit.
 
 ### Span mapping
 
-Every span class implements a marker interface, `MdSpan`, so clearing styles removes only our spans and never the IME's or the selection's.
+Styling spans live on the mirrored overlay, so clearing styles never removes the IME's or the selection's spans.
 
 | Core style | GTK tag today | Android span |
 | --- | --- | --- |
@@ -56,8 +58,7 @@ Every span class implements a marker interface, `MdSpan`, so clearing styles rem
 | `Code` | monospace, scale 0.92 | `TypefaceSpan("monospace")` + `RelativeSizeSpan(0.92f)` |
 | `CodeBlock` | monospace, scale 0.92, 18 px inset | as `Code` + `LeadingMarginSpan.Standard(18dp)` |
 | `Link` | underline | `UnderlineSpan` + link colour |
-| `Task` | monospace | `TypefaceSpan("monospace")` |
-| `Checked` | monospace, strikethrough | `TypefaceSpan("monospace")` + `StrikethroughSpan` |
+| `Task` / `Checked` | native checkbox overlay | `TaskSpan` reserves space for a native `CheckBox` in the editor frame |
 | `ListItemStart` | 3 px above | `LineHeightSpan` adding 3dp above the first line |
 | list markers | hanging indent to the marker width | `LeadingMarginSpan.Standard(0, markerWidth)`, with the width from `Paint.measureText` on the marker text |
 | hidden syntax | `invisible` | `HiddenSpan`: a `ReplacementSpan` with zero width that draws nothing |
@@ -67,8 +68,8 @@ Every span class implements a marker interface, `MdSpan`, so clearing styles rem
 
 ### Hidden syntax
 
-- On each selection change, call `document.hiddenOutside(selStart, selEnd)`, diff against the applied ranges, and add or remove `HiddenSpan`s.
-- The block with the cursor is always revealed, so the cursor never sits inside hidden text. Moving into another block reveals that block first.
+- Use `document.hiddenSyntax()` for all supported delimiters, regardless of the selection.
+- Shared source edits repair partially deleted runs and whitespace at inline-style boundaries. Backspace/Delete cross invisible delimiters in one keystroke; IME composition retains UTF-16 offsets.
 - A `ReplacementSpan` must not cross a line break. Check that no hidden range contains `\n`, especially for setext headings and fence lines, and split any that do. Add a core test for this.
 - Tapping below the last line when it contains hidden text crashed on the desktop (commit `91e0ede`). Test the same case on Android.
 
@@ -77,7 +78,7 @@ Every span class implements a marker interface, `MdSpan`, so clearing styles rem
 - In `afterTextChanged`, if the change was a single inserted `\n` typed by the user and the cursor isn't in a code block (`core.lineInCodeBlock`, from the draft's current text), take the line before the newline and call `list_enter(line)`:
   - `Continue { marker, next }`: if the cursor was past `marker`, insert `next` without its leading `\n` at the cursor.
   - `End`: delete the empty item's marker along with the newline just typed.
-- Make these edits from a `post {}` rather than inside the watcher callback. They go through the watcher like typing, so they are saved and undone like typing.
+- Continue lists synchronously in `afterTextChanged`, inside the keyboard's edit. These source edits bypass rich-text repair and go through the draft watcher like typing.
 - Hardware Enter keys arrive through the same path. Check that one Enter never produces two newlines.
 
 ## Links
@@ -105,8 +106,8 @@ Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` i
 2. An edit from another device arrives before the cursor: the cursor keeps its place relative to the text around it.
 3. Undo after a remote edit reverts only local typing.
 4. Enter on `- [ ] item` continues with `- [ ] `, and Enter on an empty `- ` ends the list.
-5. Moving the cursor between blocks shows and hides `**` in each block as it becomes active.
-6. Copying styled text gives Markdown source, and pasting HTML gives plain text.
+5. Moving the cursor and selecting text keep supported syntax hidden.
+6. Copying styled text gives visible text, and pasting HTML gives plain text.
 7. Composition with Gboard and one other keyboard: no duplicated or lost characters.
 
 ## Notes
@@ -125,7 +126,7 @@ Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` i
   - Results on the phone, release build, typing near the top: frame median 6 ms and 0 janky frames in the 50,000-character note; median 7 ms and 1 janky frame in the 100 KB docs note. Debug builds take 18–20 ms per keystroke either way.
 - **Styling a whole note happens off screen.** Building thousands of spans one by one is slow, so `MarkdownStyler.style` builds them on a `SpannableString` and copies them into the overlay in one pass. `SpannableStringBuilder` keeps its spans sorted as each one is added; the copy sorts them once. When a parse brings more than 500 new spans, as after a long paste, the overlay is rebuilt the same way.
 - **Code uses Droid Sans Mono, loaded from `/system/fonts`.** On the Motorola, the font setting replaces every family: `Typeface.MONOSPACE` is the proportional system font, and its backtick has no width, so `` `a `` drew as "à". The editor falls back to `Typeface.MONOSPACE` if the file is missing.
-- **Hidden syntax is recomputed only when the active blocks change.** A new FFI call, `active_blocks`, makes this possible, so moving the cursor within a block costs nothing.
+- **Hidden syntax is selection-independent.** `hidden_syntax` splits ranges at line breaks and keeps every supported delimiter hidden. Selection changes do not trigger layout.
 - **Hidden ranges never contain a line break.** The FFI splits them, with a Rust test. The only case was a setext heading's underline (`===\n`). On Android its line stays as an empty line, where the desktop hides it entirely.
 - **Trashed notes stay non-focusable**, as in step 8, rather than using `keyListener = null` plus `setTextIsSelectable(true)`. Switching back means restoring the key listener, movement method and input type by hand, which is fragile. They can't be selected or copied until restored.
 - **Measured on the emulator with debug builds** (unoptimized Rust and ART), on a 50,000-character list note:
@@ -135,7 +136,15 @@ Use a 50,000-character note: `LINE_DIFF_CHARS` in `crates/core/src/storage.rs` i
   - opening one: about 0.9 s (0.38 s to style, 0.55 s for `setText`), over the 100 ms budget. Step 11 measures release builds on a phone.
 - **Tests (`EditorTest`):**
   - Keyboard input through an `InputConnection`: composition, CJK, emoji, and deletes across surrogate pairs.
-  - A change before the cursor, list continuation and ending (including a hardware Enter), no continuation inside code blocks, syntax per active block, copy and paste, and the 50k timing.
+  - A change before the cursor, list continuation and ending (including a hardware Enter), no continuation inside code blocks, persistent hidden syntax, copy and paste, and the 50k timing.
   - The tests detach the real keyboard first. An attached IME finishes compositions it didn't start, which made the first version of the composition test fail.
   - Doc test 2 applies an `Applied` through the store's listener, because instrumented tests have no second device. The core's side of a remote edit, and doc test 3, are covered by the Rust tests.
   - Test 7: on the phone, injected keystrokes went through Gboard, which composed and committed words, with no lost or doubled characters. A second keyboard is still untested.
+
+## Rich text parity
+
+`crates/core/src/formatting.rs` and `commands.rs` now own the source-edit rules and command catalog used by both UIs. The FFI adapter converts Android UTF-16 positions to character offsets and back, rejecting offsets inside surrogate pairs. Formatting commands and checkbox toggles bracket their edits with `undo_boundary`.
+
+`FormattingMenu` keeps keyboard focus in the editor while the slash popup is open. It supports filtering, touch, arrows, Enter/Tab, and Escape. Selecting text exposes the same commands through Android's floating action toolbar. Every action rechecks the current selection and read-only state.
+
+`TaskCheckboxes` creates native controls only for visible task spans. Controls follow the moving spans after edits and scrolling, preserve the editor selection, and are disabled for trashed notes. Ordered tasks retain their number; nested tasks retain indentation; code blocks do not create controls.

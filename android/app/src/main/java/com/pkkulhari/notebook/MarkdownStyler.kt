@@ -63,9 +63,6 @@ class MarkdownStyler(private val text: NoteEditText) {
     private var indents = listOf<Styled>()
     private val hidden = mutableSetOf<HiddenSpan>()
 
-    /** The blocks whose syntax shows, as of the last hidden-syntax update. */
-    private var shownBlocks: List<TextRange>? = null
-
     /** Runs with the link under the cursor, or null. */
     var onLink: ((String?) -> Unit)? = null
     private var link: String? = null
@@ -77,28 +74,25 @@ class MarkdownStyler(private val text: NoteEditText) {
 
     /**
      * A parse, with what placing it needs worked out up front: off the main
-     * thread for a parse while typing. `blocks` and `hidden` are for the
-     * selection when the parse began.
+     * thread for a parse while typing. Hidden syntax is selection-independent.
      */
     private class Parsed(
         val document: MarkdownDocument,
         val styles: MutableSet<Key>,
         val indents: MutableSet<Key>,
-        val blocks: List<TextRange>,
         val hidden: MutableSet<TextRange>,
     ) {
         companion object {
-            fun of(document: MarkdownDocument, start: Int, end: Int) = Parsed(
+            fun of(document: MarkdownDocument) = Parsed(
                 document,
                 document.spans().mapTo(HashSet()) { Key(it.style, it.start, it.end) },
                 document.listMarkers().mapTo(HashSet()) { Key(null, it.start, it.end) },
-                document.activeBlocks(start, end),
-                document.hiddenOutside(start, end).toHashSet(),
+                document.hiddenSyntax().toHashSet(),
             )
         }
     }
 
-    /** Zero width and draws nothing: Markdown syntax outside the active block. */
+    /** Zero width and draws nothing: supported Markdown syntax, even while editing. */
     class HiddenSpan : ReplacementSpan() {
         override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?) = 0
 
@@ -106,6 +100,12 @@ class MarkdownStyler(private val text: NoteEditText) {
             canvas: Canvas, text: CharSequence?, start: Int, end: Int, x: Float,
             top: Int, y: Int, bottom: Int, paint: Paint,
         ) {}
+    }
+
+    class TaskSpan(val width: Int, val checked: Boolean) : ReplacementSpan() {
+        override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?) = width
+        override fun draw(canvas: Canvas, text: CharSequence?, start: Int, end: Int, x: Float,
+            top: Int, y: Int, bottom: Int, paint: Paint) {}
     }
 
     private class SpaceAbove(private val px: Int) : LineHeightSpan {
@@ -191,7 +191,7 @@ class MarkdownStyler(private val text: NoteEditText) {
         generation += 1
         val document = parseMarkdown(body)
         setDocument(document)
-        restyle(body, cursor, cursor, Parsed.of(document, cursor, cursor))
+        restyle(body, cursor, cursor, Parsed.of(document))
     }
 
     fun attach() {
@@ -200,51 +200,40 @@ class MarkdownStyler(private val text: NoteEditText) {
     }
 
     fun closed() {
+        document?.close()
+        document = null
         generation += 1
         current = false
         main.removeCallbacks(parse)
         setLink(null)
     }
 
-    /**
-     * The text changed at `at`. Parse again after a short pause, and meanwhile
-     * show the syntax on the edited line, so it doesn't flicker while typing.
-     */
+    /** Keep existing spans in place while the asynchronous parser catches up. */
     fun changed(at: Int) {
         generation += 1
         current = false
-        val start = lineStart(overlay, at)
-        val end = TextUtils.indexOf(overlay, '\n', at).let { if (it < 0) overlay.length else it }
-        val revealed = mutableListOf<IntRange>()
-        for (span in overlay.getSpans(start, end, HiddenSpan::class.java)) {
-            revealed += overlay.getSpanStart(span) until overlay.getSpanEnd(span)
-            overlay.removeSpan(span)
-            hidden -= span
-        }
-        relayout(revealed)
-        shownBlocks = null
         main.removeCallbacks(parse)
         main.postDelayed(parse, PARSE_DELAY_MS)
     }
 
     fun selectionChanged() {
-        val start = text.selectionStart
-        val end = text.selectionEnd
-        if (start < 0 || document == null || !current) return
-        relayout(updateHidden(overlay, minOf(start, end), maxOf(start, end)))
-        updateLink(start)
+        if (text.selectionStart >= 0 && current) updateLink(text.selectionStart)
     }
+
+    /** Whether this edit touches rendered markup; ordinary typing stays cheap. */
+    fun needsRepair(start: Int, end: Int): Boolean =
+        overlay.getSpans((start - 2).coerceAtLeast(0), (end + 2).coerceAtMost(overlay.length), StyleSpan::class.java).isNotEmpty() ||
+            overlay.getSpans(start, end, HiddenSpan::class.java).isNotEmpty() ||
+            overlay.getSpans((start - 1).coerceAtLeast(0), end, TaskSpan::class.java).isNotEmpty()
 
     private fun request() {
         val generation = generation
         val source = text.text.toString()
-        val start = minOf(text.selectionStart, text.selectionEnd).coerceAtLeast(0)
-        val end = maxOf(text.selectionStart, text.selectionEnd).coerceAtLeast(0)
         newest = generation
         PARSER.execute {
             if (generation != newest) return@execute
             val document = parseMarkdown(source)
-            val parsed = Parsed.of(document, start, end)
+            val parsed = Parsed.of(document)
             main.post {
                 if (generation != this.generation) return@post document.close()
                 setDocument(document)
@@ -291,14 +280,12 @@ class MarkdownStyler(private val text: NoteEditText) {
      */
     private fun place(target: Spannable, selectionStart: Int, selectionEnd: Int, parsed: Parsed): List<IntRange> {
         val start = minOf(selectionStart, selectionEnd).coerceAtLeast(0)
-        val end = maxOf(selectionStart, selectionEnd).coerceAtLeast(0)
         val changed = mutableListOf<IntRange>()
         styles = diff(target, styles, parsed.styles, changed)
+        changed += updateHidden(target, parsed)
         // Indents depend on each marker's width in its own styling, so they're
         // measured after the other spans are in place.
         indents = diff(target, indents, parsed.indents, changed)
-        shownBlocks = null
-        changed += updateHidden(target, start, end, parsed)
         updateLink(start)
         return changed
     }
@@ -339,6 +326,9 @@ class MarkdownStyler(private val text: NoteEditText) {
         Style.H1 -> listOf(RelativeSizeSpan(1.875f), StyleSpan(Typeface.BOLD))
         Style.H2 -> listOf(RelativeSizeSpan(1.3f), StyleSpan(Typeface.BOLD))
         Style.H3 -> listOf(RelativeSizeSpan(1.12f), StyleSpan(Typeface.BOLD))
+        Style.H4 -> listOf(RelativeSizeSpan(1.05f), StyleSpan(Typeface.BOLD))
+        Style.H5 -> listOf(StyleSpan(Typeface.BOLD))
+        Style.H6 -> listOf(RelativeSizeSpan(0.95f), StyleSpan(Typeface.BOLD))
         Style.STRONG -> listOf(StyleSpan(Typeface.BOLD))
         Style.EMPHASIS -> listOf(StyleSpan(Typeface.ITALIC))
         Style.STRIKE -> listOf(StrikethroughSpan())
@@ -349,8 +339,8 @@ class MarkdownStyler(private val text: NoteEditText) {
         Style.CODE -> listOf(TypefaceSpan(MONOSPACE), RelativeSizeSpan(0.92f))
         Style.CODE_BLOCK -> listOf(TypefaceSpan(MONOSPACE), RelativeSizeSpan(0.92f), LeadingMarginSpan.Standard(text.context.dp(18)))
         Style.LINK -> listOf(UnderlineSpan(), ForegroundColorSpan(text.linkTextColors.defaultColor))
-        Style.TASK -> listOf(TypefaceSpan(MONOSPACE))
-        Style.CHECKED -> listOf(TypefaceSpan(MONOSPACE), StrikethroughSpan())
+        Style.TASK -> listOf(TaskSpan(text.context.dp(28), false))
+        Style.CHECKED -> listOf(TaskSpan(text.context.dp(28), true))
         Style.LIST_ITEM_START -> listOf(SpaceAbove(text.context.dp(3)))
         // A list item's wrapped lines line up with its text, not its bullet.
         null -> listOf(
@@ -358,18 +348,16 @@ class MarkdownStyler(private val text: NoteEditText) {
         )
     }
 
-    /**
-     * Returns changed syntax ranges; moving within the same blocks needs no
-     * relayout. A `parsed` that began with the same blocks showing has the
-     * syntax to hide worked out already.
-     */
-    private fun updateHidden(target: Spannable, start: Int, end: Int, parsed: Parsed? = null): List<IntRange> {
-        val document = document ?: return emptyList()
-        val blocks = document.activeBlocks(start, end)
-        if (blocks == shownBlocks) return emptyList()
-        shownBlocks = blocks
-        val wanted = parsed?.hidden?.takeIf { parsed.blocks == blocks }
-            ?: document.hiddenOutside(start, end).toHashSet()
+    /** Keep every parsed delimiter hidden, independently of the selection. */
+    private fun updateHidden(target: Spannable, parsed: Parsed): List<IntRange> {
+        val wanted = parsed.hidden
+        // Unordered tasks show one checkbox; ordered tasks retain their number.
+        for (span in target.getSpans(0, target.length, TaskSpan::class.java)) {
+            val marker = target.getSpanStart(span)
+            var bullet = marker - 1
+            while (bullet >= 0 && (target[bullet] == ' ' || target[bullet] == '\t')) bullet--
+            if (bullet >= 0 && target[bullet] in "-*+") wanted += TextRange(bullet, marker)
+        }
         val changed = mutableListOf<IntRange>()
         hidden.removeAll { span ->
             val range = TextRange(target.getSpanStart(span), target.getSpanEnd(span))

@@ -6,7 +6,10 @@ import android.os.SystemClock
 import android.text.Spanned
 import android.text.style.StyleSpan
 import android.util.Log
+import android.widget.CheckBox
+import android.widget.FrameLayout
 import android.view.KeyEvent
+import android.view.ActionMode
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
@@ -141,14 +144,14 @@ class EditorTest {
     }
 
     @Test
-    fun syntaxShowsOnlyInTheActiveBlock() {
+    fun syntaxStaysHiddenWhileEditingAndSelecting() {
         onMain { input.commitText("**one**\n\n**two**", 1) }
-        // The cursor is in the second block, so the first one's syntax hides.
-        waitUntil("the first block's syntax to hide") { hiddenStarts() == listOf(0, 5) }
+        // Both blocks stay rendered, including the active selection.
+        waitUntil("the first block's syntax to hide") { hiddenStarts() == listOf(0, 5, 9, 14) }
         onMain { text.setSelection(1) }
-        assertEquals(listOf(9, 14), onMain { hiddenStarts() })
+        assertEquals(listOf(0, 5, 9, 14), onMain { hiddenStarts() })
         onMain { text.setSelection(0, text.length()) }
-        assertEquals(emptyList<Int>(), onMain { hiddenStarts() })
+        assertEquals(listOf(0, 5, 9, 14), onMain { hiddenStarts() })
     }
 
     @Test
@@ -216,15 +219,15 @@ class EditorTest {
     }
 
     @Test
-    fun copyingKeepsMarkdownAndPastingDropsFormatting() {
+    fun copyingUsesVisibleTextAndPastingDropsFormatting() {
         val clipboard = context.getSystemService(ClipboardManager::class.java)
         onMain { input.commitText("Plant **tomatoes**", 1) }
-        waitUntil("styling") { hiddenStarts().isEmpty() && shown().getSpans(0, text.length(), StyleSpan::class.java).isNotEmpty() }
+        waitUntil("styling") { hiddenStarts().isNotEmpty() && shown().getSpans(0, text.length(), StyleSpan::class.java).isNotEmpty() }
         onMain {
             text.selectAll()
             text.onTextContextMenuItem(android.R.id.copy)
         }
-        assertEquals("Plant **tomatoes**", onMain { clipboard.primaryClip!!.getItemAt(0).coerceToText(context).toString() })
+        assertEquals("Plant tomatoes", onMain { clipboard.primaryClip!!.getItemAt(0).coerceToText(context).toString() })
 
         onMain {
             clipboard.setPrimaryClip(ClipData.newHtmlText("rich", "bold", "<b>bold</b>"))
@@ -236,6 +239,210 @@ class EditorTest {
         Thread.sleep(300)
         val pasted = onMain { shown().getSpans(text.length() - 3, text.length(), StyleSpan::class.java).toList() }
         assertTrue("pasted text kept foreign formatting: $pasted", pasted.isEmpty())
+    }
+
+    private fun shortcut(code: Int, shift: Boolean = false) {
+        text.onKeyDown(code, KeyEvent(0, 0, KeyEvent.ACTION_DOWN, code, 0,
+            KeyEvent.META_CTRL_ON or if (shift) KeyEvent.META_SHIFT_ON else 0))
+    }
+
+    @Test
+    fun formattingSelectionAndUndoHaveSeparateSteps() {
+        onMain {
+            input.commitText("🌿 hello\nsecond\nlast", 1)
+            text.setSelection(3, 8)
+            shortcut(KeyEvent.KEYCODE_B)
+        }
+        assertEquals("🌿 **hello**\nsecond\nlast", content())
+        assertInStep()
+        onMain { text.onTextContextMenuItem(android.R.id.undo) }
+        assertEquals("🌿 hello\nsecond\nlast", content())
+        onMain { text.onTextContextMenuItem(android.R.id.redo) }
+        assertEquals("🌿 **hello**\nsecond\nlast", content())
+        onMain {
+            text.setSelection(5, 10)
+            shortcut(KeyEvent.KEYCODE_I)
+        }
+        assertEquals("🌿 ***hello***\nsecond\nlast", content())
+        onMain {
+            text.setSelection(0, text.text.indexOf("last"))
+            shortcut(KeyEvent.KEYCODE_8, shift = true)
+        }
+        assertEquals("1. 🌿 ***hello***\n2. second\nlast", content())
+        assertInStep()
+    }
+
+    @Test
+    fun selectionToolbarFormatsEverySelectedLine() {
+        onMain {
+            input.commitText("one\ntwo\nlast", 1)
+            text.isFocusableInTouchMode = true
+            text.requestFocus()
+            text.setSelection(0, 8)
+            val callback = text.customSelectionActionModeCallback!!
+            val mode = text.startActionMode(callback, ActionMode.TYPE_FLOATING)!!
+            mode.invalidate()
+            val item = (0 until mode.menu.size()).map(mode.menu::getItem).single { it.title == "Heading 4" }
+            assertTrue(callback.onActionItemClicked(mode, item))
+        }
+        assertEquals("#### one\n#### two\nlast", content())
+        assertInStep()
+        onMain { text.onTextContextMenuItem(android.R.id.undo) }
+        assertEquals("one\ntwo\nlast", content())
+    }
+
+    @Test
+    fun slashCommandsWorkWithImeAndHardwareKeys() {
+        onMain { input.commitText("🌿 /h6", 1) }
+        // Let the menu's posted update run, as between actual keystrokes.
+        onMain { input.commitText("\n", 1) }
+        assertEquals("###### 🌿 ", content())
+        onMain {
+            text.setSelection(text.length())
+            input.commitText("\n/todo", 1)
+        }
+        onMain { text.onKeyDown(KeyEvent.KEYCODE_TAB, KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_TAB)) }
+        assertEquals("###### 🌿 \n- [ ] ", content())
+        assertInStep()
+        onMain {
+            input.commitText("task\n", 1)
+            input.commitText("/quote", 1)
+        }
+        onMain { text.onKeyDown(KeyEvent.KEYCODE_ESCAPE, KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ESCAPE)) }
+        onMain { input.commitText("!", 1) }
+        assertTrue(content().endsWith("/quote!"))
+        assertInStep()
+    }
+
+    @Test
+    fun slashMenuSurvivesAutosaveWhileFiltering() {
+        var echoes = 0
+        val listener = onMain { store.listener!! }
+        onMain {
+            store.listener = object : Store.Listener by listener {
+                override fun applied(applied: Applied) {
+                    listener.applied(applied)
+                    if (applied.edits.isEmpty()) echoes++
+                }
+            }
+        }
+        try {
+            onMain { input.commitText("/", 1) }
+            waitUntil("the slash to autosave and echo back without text changes") { echoes > 0 }
+            val saved = onMain { echoes }
+            onMain { input.commitText("h2", 1) }
+            waitUntil("the filtered command to autosave") { echoes > saved }
+            onMain { input.commitText("\n", 1) }
+            assertEquals("## ", content())
+            assertInStep()
+        } finally {
+            onMain { store.listener = listener }
+        }
+    }
+
+    @Test
+    fun remoteTextEditsStillDismissTheSlashMenu() {
+        onMain { input.commitText("/h2", 1) }
+        onMain {
+            // The draft already contains incoming text when it notifies the view.
+            store.core.replace(id, 0, 0, "Remote ")
+            store.listener!!.applied(Applied(listOf(TextEdit.Insert(0, "Remote ")), null))
+        }
+        onMain { input.commitText("\n", 1) }
+        assertEquals("Remote /h2\n", content())
+        assertInStep()
+    }
+
+    @Test
+    fun hiddenDelimitersSurviveCompositionSpaceAndVisibleDeletion() {
+        onMain { input.commitText("**hello**", 1) }
+        waitUntil("hidden delimiters") { hiddenStarts() == listOf(0, 7) }
+        onMain {
+            text.setSelection(7)
+            input.setComposingRegion(2, 7)
+            input.setComposingText("hello!", 1)
+            input.finishComposingText()
+        }
+        assertEquals("**hello!**", content())
+        onMain { input.commitText(" ", 1) }
+        assertEquals("**hello!** ", content())
+        assertInStep()
+        onMain {
+            text.setSelection(10)
+            input.deleteSurroundingText(1, 0)
+        }
+        assertEquals("**hello** ", content())
+        onMain {
+            text.setSelection(2, 7)
+            input.commitText("🌿", 1)
+        }
+        assertEquals("🌿 ", content())
+        assertInStep()
+    }
+
+    private fun checkboxes(): List<CheckBox> {
+        val frame = text.parent as FrameLayout
+        return (0 until frame.childCount).map(frame::getChildAt).filterIsInstance<CheckBox>()
+    }
+
+    @Test
+    fun checkboxesToggleUndoAndTrackEdits() {
+        onMain { input.commitText("- [ ] first\n  - [X] nested\n\n```\n- [ ] code\n```", 1) }
+        waitUntil("two native checkboxes") { checkboxes().size == 2 }
+        val original = content()
+        val cursor = onMain { text.selectionStart }
+        onMain {
+            val button = checkboxes().first { it.contentDescription == "first" }
+            assertTrue(button.isFocusable)
+            button.performClick()
+        }
+        assertEquals(original.replaceFirst("[ ]", "[x]"), content())
+        assertEquals(cursor, onMain { text.selectionStart })
+        assertInStep()
+        onMain { text.onTextContextMenuItem(android.R.id.undo) }
+        assertEquals(original, content())
+        onMain { text.onTextContextMenuItem(android.R.id.redo) }
+        assertTrue(content().startsWith("- [x]"))
+        onMain { text.text.insert(0, "🌿\n\n") }
+        waitUntil("checkboxes after an insertion") { checkboxes().size == 2 && checkboxes().any { it.contentDescription == "nested" } }
+        onMain { checkboxes().first { it.contentDescription == "nested" }.performClick() }
+        assertTrue(content().contains("  - [ ] nested"))
+        assertInStep()
+        waitUntil("the updated first checkbox") {
+            checkboxes().any { it.contentDescription == "first" && it.isChecked } &&
+                shown().getSpans(0, shown().length, MarkdownStyler.TaskSpan::class.java)
+                    .any { it.checked && shown().getSpanStart(it) == text.text.indexOf("[x] first") }
+        }
+        val toggledButton = onMain {
+            val button = checkboxes().first { it.contentDescription == "first" }
+            assertTrue(button.requestFocusFromTouch())
+            button.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SPACE))
+            button.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SPACE))
+            button
+        }
+        assertTrue(content().contains("- [ ] first"))
+        waitUntil("the unchecked task span") {
+            shown().getSpans(0, shown().length, MarkdownStyler.TaskSpan::class.java).all { !it.checked } &&
+                checkboxes().any { it.contentDescription == "first" && it !== toggledButton }
+        }
+        onMain {
+            val button = checkboxes().first { it.contentDescription == "first" }
+            assertTrue("toggling must preserve checkbox focus after parsing", button.hasFocus())
+            button.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SPACE))
+            button.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SPACE))
+        }
+        assertTrue(content().contains("- [x] first"))
+        val beforeTrash = content()
+        onMain {
+            store.trashOrRestore()
+            store.showFilter(Filter.Trash)
+        }
+        waitUntil("the trashed task note") { store.notes.any { it.id == id } }
+        onMain { store.openNote(id) }
+        waitUntil("disabled checkboxes") { checkboxes().size == 2 && checkboxes().all { !it.isEnabled } }
+        onMain { checkboxes().first().performClick() }
+        assertEquals(beforeTrash, content())
+        assertInStep()
     }
 
     /** Typing at the top shifts every later span, exposing layout regressions. */

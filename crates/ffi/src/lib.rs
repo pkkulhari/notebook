@@ -18,6 +18,7 @@ uniffi::setup_scaffolding!();
 
 #[cfg(target_os = "android")]
 mod android;
+mod formatting;
 mod markdown;
 mod types;
 
@@ -204,6 +205,13 @@ impl Core {
             reason: format!("No draft is open for note {id}"),
         })?;
         Ok(draft.replace(unit(at)?, unit(len)?, &text)?)
+    }
+
+    /// Separate a formatting command or checkbox toggle from surrounding typing.
+    pub fn undo_boundary(&self, id: String) {
+        if let Some(draft) = self.drafts().get_mut(&id) {
+            draft.undo_boundary();
+        }
     }
 
     /// Whether the draft's line that ends at `at` is in a code block, by its
