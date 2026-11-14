@@ -176,6 +176,9 @@ pub fn parse(source: &str, units: Units) -> Document {
                 {
                     doc.hidden.push(chars(range.start..range.start + 1));
                     doc.hidden.push(chars(range.start + end..range.end));
+                } else if text.len() > 2 && text.starts_with('<') && text.ends_with('>') {
+                    // An autolink shows its URL without the angle brackets.
+                    hide_pair(&mut doc, &chars, &range, 1);
                 }
             }
             Event::TaskListMarker(checked) => {
@@ -530,6 +533,11 @@ mod tests {
         assert_eq!(doc.links[0].1, "https://example.org");
         assert!(doc.spans.iter().any(|s| s.style == "code-block"));
         assert_eq!(doc.hidden.len(), 4);
+        let doc = parse("see <https://example.org> 🌿", Units::Chars);
+        assert_eq!(doc.links[0].1, "https://example.org");
+        assert_eq!(doc.hidden, vec![4..5, 24..25]);
+        assert_eq!(doc.link_at(5), Some("https://example.org"));
+        assert_units_agree("🌿 <https://example.org> and [🌿](<https://a.org/(b)>)");
     }
 
     #[test]

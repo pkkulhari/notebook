@@ -72,7 +72,7 @@ Search finds notes across all notebooks. While viewing **Trash**, search finds d
 
 Notes are still stored as Markdown for compatibility and sync, but supported formatting markers stay hidden even when you select or edit text. Copying copies the visible text. Type `/` at the start of a line or after a space to open the block menu, then type to filter (for example, `/h2`, `/todo`, or `/quote`). Use ↑/↓ to navigate and Enter or Tab to apply; Escape closes the menu and keeps your typed text. Choosing a command converts the current line and removes the command text. Slashes in URLs, paths, and code do not open the menu.
 
-Selecting text opens the same formatting menu, with bold, italic, strikethrough, headings H1–H6, lists, and quotes. Inline styles apply to the selected text; block styles apply to every selected line. Click a choice or use ↑/↓ and Enter to apply it. Escape or clicking outside closes the menu without applying formatting. Formatting is also available through shortcuts and the right-click menu. List shortcuts work on the current line or selected lines; Enter continues a list, and Enter on an empty item ends it. **Ctrl+click** opens web and email links. Tables, images, and HTML remain source text.
+Selecting text opens the same formatting menu, with bold, italic, strikethrough, headings H1–H6, lists, and quotes. Inline styles apply to the selected text; block styles apply to every selected line. Click a choice or use ↑/↓ and Enter to apply it. Escape or clicking outside closes the menu without applying formatting. Formatting is also available through shortcuts and the right-click menu. List shortcuts work on the current line or selected lines; Enter continues a list, and Enter on an empty item ends it. Pasting a web or email address makes it a link, and pasting one over selected text links that text; pastes into code stay plain. Type `/link`, choose **Link** from the selection menu, or press **Ctrl+K** to type a URL for a new link or for the selected text. **Ctrl+click** opens web and email links. Tables, images, and HTML remain source text.
 
 To-do items (`- [ ]` and `- [x]`) display as working checkboxes. Click a checkbox, or focus it and press Space, to mark a task complete or incomplete. Changes save and sync with the note and can be undone with **Ctrl+Z**.
 
@@ -99,6 +99,7 @@ Devices find each other with mDNS and sync over UDP, so a firewall must allow bo
 | Navigate / apply / close block menu | ↑↓ / Enter or Tab / Escape |
 | Bold / italic (selected text) | Ctrl+B / Ctrl+I |
 | Strikethrough (selected text) | Ctrl+Shift+X |
+| Link (selected text or at caret) | Ctrl+K |
 | Bulleted / numbered list | Ctrl+Shift+7 / Ctrl+Shift+8 |
 | Trash / restore note | Ctrl+Shift+Delete |
 | Return focus to editor | Escape |

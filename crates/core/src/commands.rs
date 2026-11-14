@@ -5,6 +5,8 @@ use crate::formatting::{Block, Format};
 pub enum Action {
     Block(Block),
     Inline(Format),
+    /// Ask for a URL, then link the selection or insert a link.
+    Link,
 }
 
 pub struct Command {
@@ -99,6 +101,13 @@ pub const COMMANDS: &[Command] = &[
         icon: "❝",
         hint: ">",
         search: "quote blockquote",
+    },
+    Command {
+        action: Action::Link,
+        label: "Link",
+        icon: "🔗",
+        hint: "Ctrl+K",
+        search: "link url hyperlink web address",
     },
     Command {
         action: Action::Block(Block::Heading(5)),
@@ -198,5 +207,8 @@ mod tests {
             assert_eq!(found[0].action, Action::Block(block));
         }
         assert!(!COMMANDS.iter().any(|c| c.matches("unknown")));
+        let found: Vec<_> = COMMANDS.iter().filter(|c| c.matches("url")).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].action, Action::Link);
     }
 }

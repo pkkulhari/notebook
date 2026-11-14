@@ -117,7 +117,8 @@ impl SlashMenu {
             .is_none_or(|old| old.text != query.text);
         if changed {
             self.filter(|command| {
-                matches!(command.action, Action::Block(_)) && command.matches(&query.text)
+                matches!(command.action, Action::Block(_) | Action::Link)
+                    && command.matches(&query.text)
             });
         }
         self.heading.set_text("Basic blocks");
@@ -158,16 +159,7 @@ impl SlashMenu {
     }
 
     fn point_to(&self, offset: usize, editor: &gtk::TextView) {
-        let rect = editor.iter_location(&editor.buffer().iter_at_offset(offset as i32));
-        let visible = editor.visible_rect();
-        // Select-all can leave the caret offscreen. Keep the menu in view.
-        let (x, y) = editor.buffer_to_window_coords(
-            gtk::TextWindowType::Widget,
-            rect.x().clamp(visible.x(), visible.x() + visible.width()),
-            rect.y().clamp(visible.y(), visible.y() + visible.height()),
-        );
-        self.popover
-            .set_pointing_to(Some(&gdk::Rectangle::new(x, y, 1, rect.height())));
+        point_popover(&self.popover, offset, editor);
     }
 
     pub fn move_selection(&self, direction: i32) {
@@ -196,4 +188,17 @@ impl SlashMenu {
             .and_then(|row| COMMANDS.get(row.index() as usize))
             .map(|c| c.action)
     }
+}
+
+/// Point `popover` at the character at `offset` in `editor`.
+pub fn point_popover(popover: &gtk::Popover, offset: usize, editor: &gtk::TextView) {
+    let rect = editor.iter_location(&editor.buffer().iter_at_offset(offset as i32));
+    let visible = editor.visible_rect();
+    // Select-all can leave the caret offscreen. Keep the menu in view.
+    let (x, y) = editor.buffer_to_window_coords(
+        gtk::TextWindowType::Widget,
+        rect.x().clamp(visible.x(), visible.x() + visible.width()),
+        rect.y().clamp(visible.y(), visible.y() + visible.height()),
+    );
+    popover.set_pointing_to(Some(&gdk::Rectangle::new(x, y, 1, rect.height())));
 }

@@ -1,5 +1,6 @@
 use crate::{
     formatting::{self, Block, Format},
+    link_prompt::{LinkPrompt, LinkTarget},
     slash_menu::{self, Action as MenuAction, SlashMenu},
     task_checkboxes::TaskCheckboxes,
 };
@@ -94,6 +95,7 @@ pub(crate) struct Ui {
     editor: gtk::TextView,
     task_checkboxes: TaskCheckboxes,
     slash: SlashMenu,
+    link: LinkPrompt,
     editor_stack: gtk::Stack,
     placeholder: gtk::Label,
     list_empty: gtk::Label,
@@ -125,6 +127,7 @@ pub(crate) struct Ui {
 impl Drop for Ui {
     fn drop(&mut self) {
         self.slash.popover.unparent();
+        self.link.popover.unparent();
     }
 }
 
@@ -382,10 +385,12 @@ fn build(
     editor.add_css_class("editor");
     editor.set_accepts_tab(true);
     let slash = SlashMenu::new(&editor);
+    let link = LinkPrompt::new(&editor);
     let formats = gio::Menu::new();
     formats.append(Some("Bold"), Some("win.bold"));
     formats.append(Some("Italic"), Some("win.italic"));
     formats.append(Some("Strikethrough"), Some("win.strike"));
+    formats.append(Some("Link…"), Some("win.link"));
     editor.set_extra_menu(Some(&formats));
     let editor_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -477,6 +482,7 @@ fn build(
         editor,
         task_checkboxes: TaskCheckboxes::default(),
         slash,
+        link,
         editor_stack,
         placeholder,
         list_empty,
@@ -559,6 +565,21 @@ impl Ui {
                 && let Some(command) = slash_menu::COMMANDS.get(row.index() as usize)
             {
                 ui.run_menu_action(command.action);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.link.entry.connect_activate(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.apply_link();
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.link.popover.connect_closed(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.link.target.borrow_mut().take();
+                if ui.window.is_visible() {
+                    ui.editor.grab_focus();
+                }
             }
         });
         let weak = Rc::downgrade(self);
@@ -652,11 +673,12 @@ impl Ui {
         ] {
             self.action(action, move |ui| ui.format_selection(format));
         }
+        self.action("link", |ui| ui.prompt_link());
         self.action("save", |ui| ui.flush_drafts());
         self.action("sync", |ui| ui.show_sync_dialog());
         self.action("shortcuts", |ui| {
             let dialog = gtk::Window::builder().title("Keyboard shortcuts").transient_for(&ui.window).modal(true).default_width(420).build();
-            let label = gtk::Label::new(Some("New note                 Ctrl+N\nSearch all notes         Ctrl+F\nFocus writing            F9\nSave now                 Ctrl+S\nUndo                     Ctrl+Z\nRedo                     Ctrl+Shift+Z\nBlock menu               Type /\nChoose block             ↑↓ then Enter or Tab\nBold selection           Ctrl+B\nItalic selection         Ctrl+I\nStrikethrough selection  Ctrl+Shift+X\nBulleted list            Ctrl+Shift+7\nNumbered list            Ctrl+Shift+8\nTrash / restore          Ctrl+Shift+Delete\nOpen link                Ctrl+click\nClose menu / editor      Escape"));
+            let label = gtk::Label::new(Some("New note                 Ctrl+N\nSearch all notes         Ctrl+F\nFocus writing            F9\nSave now                 Ctrl+S\nUndo                     Ctrl+Z\nRedo                     Ctrl+Shift+Z\nBlock menu               Type /\nChoose block             ↑↓ then Enter or Tab\nBold selection           Ctrl+B\nItalic selection         Ctrl+I\nStrikethrough selection  Ctrl+Shift+X\nLink selection           Ctrl+K\nBulleted list            Ctrl+Shift+7\nNumbered list            Ctrl+Shift+8\nTrash / restore          Ctrl+Shift+Delete\nOpen link                Ctrl+click\nClose menu / editor      Escape"));
             label.set_margin_top(28); label.set_margin_bottom(28); label.set_margin_start(28); label.set_margin_end(28); label.add_css_class("shortcuts"); dialog.set_child(Some(&label)); dialog.present();
         });
         for (action, keys) in [
@@ -670,6 +692,7 @@ impl Ui {
             ("bold", vec!["<Primary>b"]),
             ("italic", vec!["<Primary>i"]),
             ("strike", vec!["<Primary><Shift>x"]),
+            ("link", vec!["<Primary>k"]),
             ("bullets", vec!["<Primary><Shift>7"]),
             ("numbers", vec!["<Primary><Shift>8"]),
         ] {
@@ -840,6 +863,35 @@ impl Ui {
             if let Some((start, end)) = buffer.selection_bounds() {
                 view.clipboard().set_text(&buffer.text(&start, &end, false));
             }
+        });
+        // A pasted URL becomes a link. Other text pastes as usual.
+        let weak = Rc::downgrade(self);
+        self.editor.connect_paste_clipboard(move |view| {
+            if !view.is_editable() {
+                return;
+            }
+            view.stop_signal_emission_by_name("paste-clipboard");
+            let weak = weak.clone();
+            let clipboard = view.clipboard();
+            clipboard.read_text_async(None::<&gio::Cancellable>, move |result| {
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let buffer = ui.editor.buffer();
+                let editable = ui.editor.is_editable();
+                match result.ok().flatten() {
+                    Some(text) if ui.paste_link(&text) => {}
+                    Some(text) => {
+                        buffer.begin_user_action();
+                        buffer.delete_selection(true, editable);
+                        buffer.insert_interactive_at_cursor(&text, editable);
+                        buffer.end_user_action();
+                    }
+                    // Not text: let GTK paste whatever it can.
+                    None => buffer.paste_clipboard(&ui.editor.clipboard(), None, editable),
+                }
+                ui.editor.scroll_mark_onscreen(&buffer.get_insert());
+            });
         });
         self.editor.connect_cut_clipboard(|view| {
             view.stop_signal_emission_by_name("cut-clipboard");
@@ -1665,7 +1717,12 @@ impl Ui {
                 self.dismiss_format_menu();
                 return;
             }
+            if action == MenuAction::Link {
+                self.prompt_link();
+                return;
+            }
             match action {
+                MenuAction::Link => {}
                 MenuAction::Inline(format) => self.format_selection(format),
                 MenuAction::Block(block) => {
                     let Some(id) = self.state.borrow().active.clone() else {
@@ -1696,7 +1753,151 @@ impl Ui {
             self.editor.grab_focus();
         } else if let MenuAction::Block(block) = action {
             self.run_slash_command(block);
+        } else if action == MenuAction::Link {
+            self.run_link_command();
         }
+    }
+
+    /// `/link` removes its query, then asks for a URL to insert at the caret.
+    fn run_link_command(&self) {
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        self.finish_rich_edit(&id);
+        let Some(query) = self.slash.query.borrow().clone() else {
+            return;
+        };
+        let buffer = self.editor.buffer();
+        let body = self.state.borrow().pages[&id].body.clone();
+        self.slash.close();
+        if buffer.has_selection()
+            || slash_menu::query(&body, buffer.cursor_position() as usize).as_ref() != Some(&query)
+        {
+            return;
+        }
+        let Some(deletion) = formatting::delete(&body, query.start..query.end) else {
+            return;
+        };
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(&id)
+            .unwrap()
+            .undo_boundary();
+        self.replace_source(&id, &buffer, deletion);
+        self.render_now(&id);
+        self.prompt_link();
+    }
+
+    /// Ask for a URL to link the selection to, or to insert at the caret.
+    fn prompt_link(&self) {
+        if !self.editor.is_editable() {
+            return;
+        }
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        if self
+            .state
+            .borrow()
+            .drafts
+            .get(&id)
+            .is_none_or(|d| d.note().deleted)
+        {
+            return;
+        }
+        self.finish_rich_edit(&id);
+        let buffer = self.editor.buffer();
+        let range = buffer
+            .selection_bounds()
+            .map(|(a, b)| a.offset() as usize..b.offset() as usize)
+            .unwrap_or_else(|| {
+                let at = buffer.cursor_position() as usize;
+                at..at
+            });
+        let body = self.state.borrow().pages[&id].body.clone();
+        self.dismiss_format_menu();
+        self.link.open(
+            LinkTarget {
+                note: id,
+                body,
+                range,
+            },
+            &self.editor,
+        );
+    }
+
+    fn apply_link(&self) {
+        let target = self.link.target.borrow_mut().take();
+        let url = formatting::typed_url(&self.link.entry.text());
+        self.link.popover.popdown();
+        let (Some(target), Some(url)) = (target, url) else {
+            return;
+        };
+        let Some(id) = self.state.borrow().active.clone() else {
+            return;
+        };
+        if id != target.note || !self.editor.is_editable() {
+            return;
+        }
+        self.finish_rich_edit(&id);
+        let body = self.state.borrow().pages[&id].body.clone();
+        // An edit from another device moved the text since the prompt opened.
+        if body != target.body {
+            return;
+        }
+        let Some(edit) = formatting::link(&body, target.range, &url) else {
+            return;
+        };
+        self.apply_edit(&id, edit);
+    }
+
+    /// Link a URL pasted on its own, or link the selection to it. Returns
+    /// false when the text should paste as it is.
+    fn paste_link(&self, pasted: &str) -> bool {
+        if !self.editor.is_editable() {
+            return false;
+        }
+        let Some(id) = self.state.borrow().active.clone() else {
+            return false;
+        };
+        self.finish_rich_edit(&id);
+        let buffer = self.editor.buffer();
+        let selection = buffer
+            .selection_bounds()
+            .map(|(a, b)| a.offset() as usize..b.offset() as usize)
+            .unwrap_or_else(|| {
+                let at = buffer.cursor_position() as usize;
+                at..at
+            });
+        let body = self.state.borrow().pages[&id].body.clone();
+        let Some(edit) = formatting::paste_link(&body, selection, pasted) else {
+            return false;
+        };
+        self.dismiss_format_menu();
+        self.apply_edit(&id, edit);
+        true
+    }
+
+    /// Replace source as one undo step and show the result.
+    fn apply_edit(&self, id: &str, edit: formatting::Edit) {
+        let buffer = self.editor.buffer();
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(id)
+            .unwrap()
+            .undo_boundary();
+        self.replace_source(id, &buffer, edit);
+        self.state
+            .borrow_mut()
+            .drafts
+            .get_mut(id)
+            .unwrap()
+            .undo_boundary();
+        self.render_now(id);
+        self.editor.grab_focus();
+        self.editor.scroll_mark_onscreen(&buffer.get_insert());
     }
 
     fn run_slash_command(&self, block: Block) {
@@ -3306,6 +3507,7 @@ mod tests {
         task_checkbox_deletion_workflow(&app);
         slash_command_workflow(&app);
         selection_menu_workflow(&app);
+        link_workflow(&app);
         sync_with_another_device(&app);
         if std::env::var_os("NOTEBOOK_BENCH_UI").is_some() {
             benchmark_ui(&app);
@@ -3631,6 +3833,89 @@ mod tests {
     }
 
     // Exercise native pointer activation when running under the test X server.
+    fn link_workflow(app: &gtk::Application) {
+        let dir = tempfile::tempdir().unwrap();
+        let ui = test_ui(app, dir.path().join("links.db"));
+        pump_until(|| ui.state.borrow().ready && ui.editor.has_focus());
+        let buffer = ui.editor.buffer();
+        let source = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), true)
+                .to_string()
+        };
+        let visible = || {
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string()
+        };
+        let type_text = |text: &str| {
+            buffer.begin_user_action();
+            buffer.insert_at_cursor(text);
+            buffer.end_user_action();
+        };
+        let paste = |text: &str| {
+            let before = source();
+            ui.editor.clipboard().set_text(text);
+            ui.editor.emit_by_name::<()>("paste-clipboard", &[]);
+            pump_until(|| source() != before);
+        };
+
+        type_text("See ");
+        paste("https://example.org/🌿");
+        assert_eq!(source(), "See <https://example.org/🌿>");
+        assert_eq!(visible(), "See https://example.org/🌿");
+        assert_eq!(
+            ui.state.borrow().document.link_at(6),
+            Some("https://example.org/🌿")
+        );
+        type_text(" and ");
+        paste("plain text");
+        assert!(source().ends_with("> and plain text"));
+        ui.undo_redo(true);
+        assert_eq!(source(), "See <https://example.org/🌿>");
+        ui.undo_redo(true);
+        assert_eq!(source(), "See ");
+
+        // Pasting a URL over selected text links that text.
+        buffer.set_text("");
+        type_text("Read the docs today");
+        buffer.select_range(&buffer.iter_at_offset(9), &buffer.iter_at_offset(13));
+        paste("https://docs.rs");
+        assert_eq!(source(), "Read the [docs](https://docs.rs) today");
+        assert_eq!(visible(), "Read the docs today");
+        assert!(!buffer.has_selection());
+
+        // The slash command asks for the URL to insert at the caret.
+        buffer.set_text("");
+        type_text("Go to /lin");
+        assert_eq!(ui.slash.selected(), Some(MenuAction::Link));
+        assert!(ui.slash_key(gdk::Key::Return));
+        assert!(ui.link.popover.is_visible());
+        assert_eq!(source(), "Go to ");
+        ui.link.entry.set_text("example.org");
+        ui.link.entry.emit_activate();
+        assert!(!ui.link.popover.is_visible());
+        assert_eq!(source(), "Go to <https://example.org>");
+        assert_eq!(buffer.cursor_position(), buffer.char_count());
+        pump_until(|| ui.editor.has_focus());
+
+        // Ctrl+K links the selection. Cancelling leaves the text alone.
+        buffer.set_text("");
+        type_text("one two");
+        buffer.select_range(&buffer.iter_at_offset(4), &buffer.iter_at_offset(7));
+        ui.prompt_link();
+        ui.link.popover.popdown();
+        assert_eq!(source(), "one two");
+        pump_until(|| ui.editor.has_focus());
+        ui.prompt_link();
+        ui.link.entry.set_text("me@example.org");
+        ui.link.entry.emit_activate();
+        assert_eq!(source(), "one [two](mailto:me@example.org)");
+        assert_eq!(visible(), "one two");
+        ui.window.close();
+        pump_until(|| !ui.window.is_visible());
+    }
+
     fn activate_menu_row(ui: &Ui, action: MenuAction) {
         for _ in 0..slash_menu::COMMANDS.len() {
             if ui.slash.selected() == Some(action) {

@@ -551,6 +551,174 @@ pub fn insert(source: &str, at: usize, text: &str) -> Edit {
     }
 }
 
+/// A URL pasted on its own: http(s), mailto, or a `www.` address, which
+/// gets https. Anything with spaces in it is prose, not a URL.
+pub fn pasted_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '<' || c == '>')
+    {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let rest = ["https://", "http://", "mailto:"]
+        .iter()
+        .find_map(|scheme| lower.strip_prefix(scheme));
+    match rest {
+        Some("") => None,
+        Some(_) => Some(text.into()),
+        None if lower.starts_with("www.") && text[4..].contains('.') && !text.ends_with('.') => {
+            Some(format!("https://{text}"))
+        }
+        None => None,
+    }
+}
+
+/// What someone typed into a link field. A bare address gets https, and an
+/// email address gets mailto. Characters a Markdown link can't hold are
+/// percent-encoded.
+pub fn typed_url(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let scheme = text.split_once(':').is_some_and(|(scheme, rest)| {
+        let mut letters = scheme.chars();
+        letters.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && letters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+            && (rest.starts_with("//")
+                || ["mailto", "tel", "sms"].contains(&scheme.to_ascii_lowercase().as_str()))
+    });
+    let url = if scheme {
+        text.to_string()
+    } else if text.contains('@') && !text.contains('/') {
+        format!("mailto:{text}")
+    } else {
+        format!("https://{text}")
+    };
+    let mut encoded = String::with_capacity(url.len());
+    for ch in url.chars() {
+        match ch {
+            ' ' => encoded.push_str("%20"),
+            '<' => encoded.push_str("%3C"),
+            '>' => encoded.push_str("%3E"),
+            c if c.is_whitespace() || c.is_control() => {}
+            c => encoded.push(c),
+        }
+    }
+    Some(encoded)
+}
+
+/// Markdown for a link showing `label`. A link that shows its own URL is an
+/// autolink, which keeps the source readable. Whitespace around the label
+/// stays outside the brackets, so a double-clicked word links cleanly.
+fn link_markdown(label: &str, url: &str) -> Option<String> {
+    let middle = label.trim();
+    if middle.contains('\n') {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut escaped = false;
+    for ch in middle.chars() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' => escaped = true,
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let first = label.len() - label.trim_start().len();
+    let last = label.trim_end().len();
+    let link = if middle.is_empty() || middle == url {
+        format!("<{url}>")
+    } else if url.contains(['(', ')']) {
+        format!("[{middle}](<{url}>)")
+    } else {
+        format!("[{middle}]({url})")
+    };
+    Some(format!("{}{link}{}", &label[..first], &label[last..]))
+}
+
+/// Link the selected text to `url`, or insert `url` as a link at a caret.
+/// The caret ends up after the link.
+pub fn link(source: &str, selection: Range<usize>, url: &str) -> Option<Edit> {
+    let chars: Vec<_> = source.chars().collect();
+    if selection.end > chars.len() {
+        return None;
+    }
+    let label = slice(&chars, selection.clone());
+    let text = link_markdown(&label, url)?;
+    let end = selection.start + text.chars().count();
+    Some(Edit {
+        range: selection,
+        text,
+        selection: end..end,
+    })
+}
+
+/// Pasting a URL makes it a link, and pasting one over selected text links
+/// that text. `None` means paste plain text: inside code or an existing
+/// link, over another URL, or while someone writes link syntax by hand.
+pub fn paste_link(source: &str, selection: Range<usize>, pasted: &str) -> Option<Edit> {
+    let url = pasted_url(pasted)?;
+    let chars: Vec<_> = source.chars().collect();
+    if selection.end > chars.len() {
+        return None;
+    }
+    let label = slice(&chars, selection.clone());
+    if pasted_url(&label).is_some() {
+        return None;
+    }
+    let at = selection.start;
+    let before = |n: usize| at.checked_sub(n).and_then(|i| chars.get(i)).copied();
+    if matches!(before(1), Some('<' | '[' | '`' | '\\'))
+        || (before(1) == Some('(') && before(2) == Some(']'))
+    {
+        return None;
+    }
+    let touches = |range: &Range<i32>| {
+        let (start, end) = (range.start as usize, range.end as usize);
+        if selection.is_empty() {
+            start < at && at < end
+        } else {
+            start < selection.end && selection.start < end
+        }
+    };
+    let doc = markdown::parse(source, Units::Chars);
+    // A character typed here is code if the whole line is. This also covers
+    // an empty line at the end of an unclosed fence.
+    let line = format!("{}x", slice(&chars, 0..at));
+    if markdown::ends_in_code_block(&line)
+        || doc.links.iter().any(|(range, _)| touches(range))
+        || doc
+            .spans
+            .iter()
+            .any(|span| matches!(span.style, "code" | "code-block") && touches(&span.range))
+    {
+        return None;
+    }
+    let label = if label.is_empty() {
+        pasted.trim().to_string()
+    } else {
+        label
+    };
+    let text = link_markdown(&label, &url)?;
+    let end = at + text.chars().count();
+    Some(Edit {
+        range: selection,
+        text,
+        selection: end..end,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,5 +1018,103 @@ mod tests {
         }
         assert_eq!(insert("**hello**", 2, " ").text, " **hello**");
         assert_eq!(insert("**hello**", 4, " 🌿 ").text, "**he 🌿 llo**");
+    }
+
+    #[test]
+    fn pasted_urls_become_links() {
+        for (pasted, expected) in [
+            ("https://example.org", "<https://example.org>"),
+            (
+                " https://example.org/a?b=1#c\n",
+                "<https://example.org/a?b=1#c>",
+            ),
+            ("mailto:me@example.org", "<mailto:me@example.org>"),
+            (
+                "www.example.org",
+                "[www.example.org](https://www.example.org)",
+            ),
+            (
+                "https://en.wikipedia.org/wiki/Rust_(language)",
+                "<https://en.wikipedia.org/wiki/Rust_(language)>",
+            ),
+        ] {
+            let edit = paste_link("See ", 4..4, pasted).unwrap();
+            let source = apply("See ", edit);
+            assert_eq!(source, format!("See {expected}"), "{pasted:?}");
+            let doc = markdown::parse(&source, Units::Chars);
+            assert_eq!(doc.link_at(5), pasted_url(pasted).as_deref(), "{pasted:?}");
+        }
+        for pasted in [
+            "example.org",
+            "https://",
+            "see https://example.org",
+            "two\nlines",
+            "ftp://example.org",
+            "www.",
+        ] {
+            assert!(paste_link("", 0..0, pasted).is_none(), "{pasted:?}");
+        }
+    }
+
+    #[test]
+    fn pasting_a_url_over_a_selection_links_the_text() {
+        let edit = paste_link("Read this 🌿 now", 5..12, "https://example.org").unwrap();
+        assert_eq!(edit.selection.start, 35);
+        let source = apply("Read this 🌿 now", edit);
+        assert_eq!(source, "Read [this 🌿](https://example.org) now");
+        assert_eq!(
+            apply(
+                "a word b",
+                paste_link("a word b", 1..7, "https://x.org/(y)").unwrap()
+            ),
+            "a [word](<https://x.org/(y)>) b"
+        );
+        // Replacing one URL with another stays a plain paste.
+        assert!(paste_link("https://old.org", 0..15, "https://new.org").is_none());
+        assert!(paste_link("one\ntwo", 0..7, "https://example.org").is_none());
+        assert!(paste_link("a ] b", 0..5, "https://example.org").is_none());
+    }
+
+    #[test]
+    fn pasting_a_url_into_syntax_or_code_stays_plain() {
+        for (source, at) in [
+            ("[text](", 7),
+            ("<", 1),
+            ("[", 1),
+            ("`", 1),
+            ("`code here`", 5),
+            ("```\ncode\n", 9),
+            ("    indented", 12),
+            ("[link](https://a.org) and", 3),
+            ("<https://a.org>", 5),
+        ] {
+            assert!(
+                paste_link(source, at..at, "https://example.org").is_none(),
+                "{source:?}"
+            );
+        }
+        assert!(paste_link("`code` ", 7..7, "https://example.org").is_some());
+        assert!(paste_link("```\ncode\n```\n", 13..13, "https://example.org").is_some());
+    }
+
+    #[test]
+    fn typed_urls_are_normalized() {
+        for (typed, expected) in [
+            ("example.org", "https://example.org"),
+            (" https://example.org/a b ", "https://example.org/a%20b"),
+            ("me@example.org", "mailto:me@example.org"),
+            ("mailto:me@example.org", "mailto:me@example.org"),
+            ("localhost:8080/x", "https://localhost:8080/x"),
+            ("ftp://files.org", "ftp://files.org"),
+            ("a.org/<x>", "https://a.org/%3Cx%3E"),
+        ] {
+            assert_eq!(typed_url(typed).as_deref(), Some(expected), "{typed:?}");
+        }
+        assert!(typed_url("  ").is_none());
+        let edit = link("x word y", 2..7, "https://a.org").unwrap();
+        assert_eq!(apply("x word y", edit), "x [word](https://a.org) y");
+        let edit = link("ab", 1..1, "https://a.org").unwrap();
+        assert_eq!(edit.selection, 16..16);
+        assert_eq!(apply("ab", edit), "a<https://a.org>b");
     }
 }

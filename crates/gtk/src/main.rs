@@ -1,4 +1,5 @@
 mod formatting;
+mod link_prompt;
 mod slash_menu;
 mod system;
 mod task_checkboxes;

@@ -77,7 +77,10 @@ pub fn format_commands(query: String, include_inline: bool) -> Vec<FormatCommand
         .iter()
         .enumerate()
         .filter(|(_, c)| {
-            (include_inline || matches!(c.action, Action::Block(_))) && c.matches(&query)
+            // Links need a URL prompt, which only the desktop editor has.
+            c.action != Action::Link
+                && (include_inline || matches!(c.action, Action::Block(_)))
+                && c.matches(&query)
         })
         .map(|(id, c)| FormatCommand {
             id: id as i32,
@@ -147,6 +150,7 @@ pub fn format_text(
                 formatting::block(&source, selected.start, kind)?
             }
             Action::Block(kind) => formatting::selected_blocks(&source, selected, kind)?,
+            Action::Link => return None,
         }
     };
     Some(result(&source, edit))
