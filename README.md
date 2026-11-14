@@ -141,7 +141,7 @@ Gradle builds the Rust library and its Kotlin bindings itself; no separate `carg
 
 ### On the phone
 
-The phone app includes the same rendered Markdown editing, slash commands, selection formatting, and interactive task checkboxes as the desktop. Type `/` to search for a block type, or select text and use the floating toolbar for bold, italic, strikethrough, headings H1–H6, lists, and quotes. Tap a checkbox to toggle it; formatting and checkbox changes save, sync, and undo separately from typing. Hardware keyboards support the formatting shortcuts above. Copying gives the visible text, and pasted formatting is discarded.
+The phone app includes the same rendered Markdown editing, slash commands, selection formatting, and interactive task checkboxes as the desktop. Type `/` to search for a block type, or select text and use the floating toolbar for bold, italic, strikethrough, headings H1–H6, lists, and quotes. Tap a checkbox to toggle it; formatting and checkbox changes save, sync, and undo separately from typing. Pasting a web or email address makes it a link, or links the selected text. Type `/link`, choose **Link** in the toolbar, or press **Ctrl+K** to type a URL. Hardware keyboards support the formatting shortcuts above. Copying gives the visible text, and pasted formatting is discarded.
 
 Notebooks, search, list continuation, trash, and undo of only your own edits also work on the phone. Tap the title to switch notebooks, and the notebook label above a note to move it.
 

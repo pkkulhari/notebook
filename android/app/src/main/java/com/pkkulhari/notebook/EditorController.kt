@@ -18,6 +18,7 @@ import com.pkkulhari.notebook.core.FormatCommand
 import com.pkkulhari.notebook.core.deleteVisible
 import com.pkkulhari.notebook.core.formatCommands
 import com.pkkulhari.notebook.core.formatText
+import com.pkkulhari.notebook.core.pasteLink
 import com.pkkulhari.notebook.core.repairRichEdit
 import com.pkkulhari.notebook.core.toggleList
 import com.pkkulhari.notebook.core.parseMarkdown
@@ -32,6 +33,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
     val styler = MarkdownStyler(text)
     private val menu = FormattingMenu(text, ::editable, ::format)
     private val tasks = TaskCheckboxes(text, ::editable, ::toggleTask)
+    val links = LinkPrompt(text)
     private var sourceEdit = false
     private var beforeEdit: String? = null
     private var repair: SourceEdit? = null
@@ -61,6 +63,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
         text.onEditorKey = ::key
         text.onDelete = ::delete
         text.onEnter = { menu.key(KeyEvent.KEYCODE_ENTER) }
+        text.onPaste = ::paste
         text.onAfterInput = {
             pendingCursor?.let { text.setSelection(it.coerceIn(0, text.length())) }
             pendingCursor = null
@@ -69,6 +72,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
 
     fun open(id: String, body: String, cursor: Int) {
         menu.close()
+        links.close()
         beforeEdit = null
         repair = null
         pendingCursor = null
@@ -86,6 +90,7 @@ class EditorController(private val store: Store, private val text: NoteEditText)
     fun close() {
         id = null
         menu.close()
+        links.close()
         tasks.close()
         handler.removeCallbacks(tick)
         styler.closed()
@@ -238,9 +243,29 @@ class EditorController(private val store: Store, private val text: NoteEditText)
 
     private fun format(command: FormatCommand, slash: Boolean) {
         if (!editable()) return
+        if (command.link && !slash) return promptLink()
+        // A slash command removes its query; a link then asks for its URL.
         val edit = formatText(text.text.toString(), text.selectionStart, text.selectionEnd, command.id, slash) ?: return
         menu.dismiss()
         replaceSource(edit, separateUndo = true)
+        if (command.link) promptLink()
+    }
+
+    /** Ask for a URL to link the selection to, or to insert at the cursor. */
+    fun promptLink() {
+        if (!editable()) return
+        menu.dismiss()
+        val note = id
+        links.open { edit -> if (id == note) replaceSource(edit, separateUndo = true) }
+    }
+
+    /** A URL pasted on its own becomes a link; pasted over text, it links the text. */
+    private fun paste(pasted: String): Boolean {
+        if (!editable()) return false
+        val edit = pasteLink(text.text.toString(), text.selectionStart, text.selectionEnd, pasted) ?: return false
+        menu.dismiss()
+        replaceSource(edit, separateUndo = true)
+        return true
     }
 
     private fun delete(backwards: Boolean): Boolean {
@@ -284,6 +309,10 @@ class EditorController(private val store: Store, private val text: NoteEditText)
                 KeyEvent.KEYCODE_I -> "italic"
                 KeyEvent.KEYCODE_X -> if (event.isShiftPressed) "strike" else null
                 else -> null
+            }
+            if (event.keyCode == KeyEvent.KEYCODE_K && !event.isShiftPressed) {
+                promptLink()
+                return true
             }
             if (query != null) {
                 formatCommands(query, true).firstOrNull()?.let { format(it, false) }

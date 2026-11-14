@@ -15,7 +15,8 @@ import android.widget.EditText
 import com.pkkulhari.notebook.core.visibleText
 
 /**
- * Undo uses the core's history of local edits; paste drops foreign formatting.
+ * Undo uses the core's history of local edits; paste drops foreign formatting
+ * and turns a URL into a link.
  *
  * Disable autofill and content capture to keep notes private and avoid sending
  * the entire note to those services on every keystroke.
@@ -37,6 +38,9 @@ class NoteEditText(context: Context, attrs: AttributeSet?) : EditText(context, a
     var onEnter: (() -> Boolean)? = null
     var onAfterInput: (() -> Unit)? = null
     var canEdit: (() -> Boolean)? = null
+
+    /** Handles pasted text itself, such as linking a URL, or returns false. */
+    var onPaste: ((String) -> Boolean)? = null
 
     override fun onSelectionChanged(selStart: Int, selEnd: Int) {
         super.onSelectionChanged(selStart, selEnd)
@@ -60,10 +64,18 @@ class NoteEditText(context: Context, attrs: AttributeSet?) : EditText(context, a
                 true
             }
         }
-        android.R.id.paste, android.R.id.pasteAsPlainText ->
-            if (canEdit?.invoke() == true) super.onTextContextMenuItem(android.R.id.pasteAsPlainText) else true
+        android.R.id.paste, android.R.id.pasteAsPlainText -> when {
+            canEdit?.invoke() != true -> true
+            clipboardText()?.let { onPaste?.invoke(it) } == true -> true
+            else -> super.onTextContextMenuItem(android.R.id.pasteAsPlainText)
+        }
         else -> super.onTextContextMenuItem(id)
     }
+
+    private fun clipboardText(): String? =
+        context.getSystemService(ClipboardManager::class.java).primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)?.coerceToText(context)?.toString()
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (onEditorKey?.invoke(event) == true) return true

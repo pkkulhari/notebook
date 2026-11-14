@@ -2,11 +2,13 @@ package com.pkkulhari.notebook
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.DialogInterface
 import android.os.SystemClock
 import android.text.Spanned
 import android.text.style.StyleSpan
 import android.util.Log
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.view.KeyEvent
 import android.view.ActionMode
@@ -30,6 +32,7 @@ class EditorTest {
     private lateinit var scenario: ActivityScenario<MainActivity>
     private lateinit var store: Store
     private lateinit var text: NoteEditText
+    private lateinit var editor: EditorController
     private lateinit var input: InputConnection
     private lateinit var id: String
 
@@ -39,6 +42,7 @@ class EditorTest {
         scenario.onActivity { activity ->
             store = (activity.application as NotebookApp).store
             text = activity.findViewById(R.id.text)
+            editor = activity.editor
         }
         waitUntil("the store to be ready") { store.ready }
         onMain { store.newNote() }
@@ -239,6 +243,84 @@ class EditorTest {
         Thread.sleep(300)
         val pasted = onMain { shown().getSpans(text.length() - 3, text.length(), StyleSpan::class.java).toList() }
         assertTrue("pasted text kept foreign formatting: $pasted", pasted.isEmpty())
+    }
+
+    private fun paste(value: String) = onMain {
+        context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("pasted", value))
+        text.onTextContextMenuItem(android.R.id.paste)
+    }
+
+    @Test
+    fun pastedUrlsBecomeLinks() {
+        onMain { input.commitText("See ", 1) }
+        paste("https://example.org/🌿")
+        assertEquals("See <https://example.org/🌿>", content())
+        assertEquals(text.length(), onMain { text.selectionStart })
+        assertInStep()
+        waitUntil("the link's brackets to hide") { hiddenStarts() == listOf(4, text.length() - 1) }
+        onMain { text.onTextContextMenuItem(android.R.id.undo) }
+        assertEquals("See ", content())
+
+        onMain {
+            text.setSelection(text.length())
+            input.commitText("the docs today", 1)
+            text.setSelection(8, 12)
+        }
+        paste("https://docs.rs")
+        assertEquals("See the [docs](https://docs.rs) today", content())
+        onMain { text.setSelection(text.length()) }
+        paste(" https://not a link")
+        assertEquals("See the [docs](https://docs.rs) today https://not a link", content())
+        assertInStep()
+    }
+
+    @Test
+    fun linkCommandAndShortcutAskForTheUrl() {
+        val submit = { url: String ->
+            onMain {
+                val dialog = editor.links.dialog!!
+                dialog.findViewById<EditText>(R.id.link_url).setText(url)
+                dialog.getButton(DialogInterface.BUTTON_POSITIVE).performClick()
+            }
+        }
+        onMain { input.commitText("Go to /lin", 1) }
+        onMain { input.commitText("\n", 1) }
+        assertEquals("Go to ", content())
+        submit("example.org")
+        assertEquals("Go to <https://example.org>", content())
+        assertInStep()
+        waitUntil("the prompt to close") { editor.links.dialog == null }
+
+        onMain {
+            text.setSelection(0, 2)
+            shortcut(KeyEvent.KEYCODE_K)
+        }
+        // Enter on a hardware keyboard inserts the link.
+        onMain {
+            val field = editor.links.dialog!!.findViewById<EditText>(R.id.link_url)
+            field.setText("me@example.org")
+            field.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
+            field.dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
+        }
+        assertEquals("[Go](mailto:me@example.org) to <https://example.org>", content())
+        onMain { text.onTextContextMenuItem(android.R.id.undo) }
+        assertEquals("Go to <https://example.org>", content())
+        assertInStep()
+        waitUntil("the prompt to close") { editor.links.dialog == null }
+
+        // The selection toolbar's Link opens the same prompt; cancelling changes nothing.
+        onMain {
+            text.isFocusableInTouchMode = true
+            text.requestFocus()
+            text.setSelection(3, 5)
+            val callback = text.customSelectionActionModeCallback!!
+            val mode = text.startActionMode(callback, ActionMode.TYPE_FLOATING)!!
+            mode.invalidate()
+            val item = (0 until mode.menu.size()).map(mode.menu::getItem).single { it.title == "Link" }
+            assertTrue(callback.onActionItemClicked(mode, item))
+            editor.links.dialog!!.getButton(DialogInterface.BUTTON_NEGATIVE).performClick()
+        }
+        assertEquals("Go to <https://example.org>", content())
     }
 
     private fun shortcut(code: Int, shift: Boolean = false) {

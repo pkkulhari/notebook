@@ -14,6 +14,9 @@ pub struct FormatCommand {
     pub icon: String,
     pub hint: String,
     pub inline: bool,
+    /// Asks for a URL. As a slash command, `format_text` only removes the
+    /// query; `link_text` then inserts the link.
+    pub link: bool,
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
@@ -77,9 +80,7 @@ pub fn format_commands(query: String, include_inline: bool) -> Vec<FormatCommand
         .iter()
         .enumerate()
         .filter(|(_, c)| {
-            // Links need a URL prompt, which only the desktop editor has.
-            c.action != Action::Link
-                && (include_inline || matches!(c.action, Action::Block(_)))
+            (include_inline || matches!(c.action, Action::Block(_) | Action::Link))
                 && c.matches(&query)
         })
         .map(|(id, c)| FormatCommand {
@@ -88,6 +89,7 @@ pub fn format_commands(query: String, include_inline: bool) -> Vec<FormatCommand
             icon: c.icon.into(),
             hint: c.hint.into(),
             inline: matches!(c.action, Action::Inline(_)),
+            link: c.action == Action::Link,
         })
         .collect()
 }
@@ -130,11 +132,13 @@ pub fn format_text(
             return None;
         }
         let query = slash_query(source.clone(), start)?;
-        let Action::Block(kind) = action else {
-            return None;
-        };
         let range = selection(&source, query.range.start, query.range.end)?;
         let deletion = formatting::delete(&source, range)?;
+        let kind = match action {
+            Action::Block(kind) => kind,
+            Action::Link => return Some(result(&source, deletion)),
+            Action::Inline(_) => return None,
+        };
         let block = formatting::block(&deletion.text, deletion.selection.start, kind)?;
         let mut chars: Vec<_> = deletion.text.chars().collect();
         chars.splice(block.range, block.text.chars());
@@ -154,6 +158,26 @@ pub fn format_text(
         }
     };
     Some(result(&source, edit))
+}
+
+/// A pasted URL as a link, or the selection linked to it. `None` means
+/// paste the text as it is.
+#[uniffi::export]
+pub fn paste_link(source: String, start: i32, end: i32, pasted: String) -> Option<SourceEdit> {
+    let selected = selection(&source, start, end)?;
+    Some(result(
+        &source,
+        formatting::paste_link(&source, selected, &pasted)?,
+    ))
+}
+
+/// Link the selection to what someone typed as a URL, or insert it as a
+/// link at a caret. `None` when there's no usable URL or text to link.
+#[uniffi::export]
+pub fn link_text(source: String, start: i32, end: i32, typed: String) -> Option<SourceEdit> {
+    let selected = selection(&source, start, end)?;
+    let url = formatting::typed_url(&typed)?;
+    Some(result(&source, formatting::link(&source, selected, &url)?))
 }
 
 #[uniffi::export]
@@ -294,6 +318,32 @@ mod tests {
         let command = format_commands("todo".into(), false)[0].id;
         let edit = format_text(source.into(), 8, 8, command, true).unwrap();
         assert_eq!(apply(source, edit), "- [ ] 🌿 ");
+    }
+
+    #[test]
+    fn links_use_utf16_offsets() {
+        let source = "🌿 /lin";
+        let command = format_commands("lin".into(), false);
+        assert_eq!(command.len(), 1);
+        assert!(command[0].link && !command[0].inline);
+        let edit = format_text(source.into(), 7, 7, command[0].id, true).unwrap();
+        assert_eq!(edit.selection, TextRange { start: 3, end: 3 });
+        let source = apply(source, edit);
+        assert_eq!(source, "🌿 ");
+        let edit = link_text(source.clone(), 3, 3, "example.org".into()).unwrap();
+        assert_eq!(edit.selection, TextRange { start: 24, end: 24 });
+        assert_eq!(apply(&source, edit), "🌿 <https://example.org>");
+        assert!(link_text(source.clone(), 3, 3, " ".into()).is_none());
+        assert!(format_text(source.clone(), 0, 2, command[0].id, false).is_none());
+
+        let edit = paste_link("🌿 word".into(), 3, 7, "https://a.org".into()).unwrap();
+        assert_eq!(apply("🌿 word", edit), "🌿 [word](https://a.org)");
+        let edit = paste_link("🌿 ".into(), 3, 3, "https://a.org/🌿".into()).unwrap();
+        assert_eq!(edit.selection, TextRange { start: 21, end: 21 });
+        assert!(paste_link("`🌿 `".into(), 3, 3, "https://a.org".into()).is_none());
+        assert!(paste_link("🌿".into(), 1, 1, "https://a.org".into()).is_none());
+        assert!(paste_link("".into(), 0, 0, "plain words".into()).is_none());
+        assert!(format_commands(String::new(), true).iter().any(|c| c.link));
     }
 
     #[test]

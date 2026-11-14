@@ -53,7 +53,7 @@ class MainActivity : Activity(), Store.Listener {
     private lateinit var syncButton: ImageButton
     private lateinit var sync: SyncPanel
 
-    private lateinit var editor: EditorController
+    internal lateinit var editor: EditorController
     private lateinit var adapter: NoteListAdapter
     private lateinit var picker: NotebookPicker
 

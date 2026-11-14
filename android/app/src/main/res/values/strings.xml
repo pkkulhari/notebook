@@ -17,6 +17,9 @@
     <string name="notebook_name">Notebook name</string>
     <string name="create">Create</string>
     <string name="rename">Rename</string>
+    <string name="link">Link</string>
+    <string name="link_hint">Paste or type a link</string>
+    <string name="insert_link">Insert</string>
     <string name="delete">Delete</string>
     <string name="delete_notebook">Delete “%1$s”?</string>
     <string name="delete_notebook_detail">Its notes move to Default.</string>
