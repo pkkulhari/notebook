@@ -245,6 +245,34 @@ class EditorTest {
         assertTrue("pasted text kept foreign formatting: $pasted", pasted.isEmpty())
     }
 
+    @Test
+    fun wrappedListLinesPlaceTheCaretWhereTheTextIs() {
+        val words = "Set the Parent Timeframe: Use the hourly chart to identify the broader trend direction"
+        for (marker in listOf("- [ ] ", "- ")) {
+            if (marker != "- [ ] ") {
+                val previous = onMain { store.active }
+                onMain { store.newNote() }
+                waitUntil("a new note") { store.active != previous && text.length() == 0 }
+            }
+            onMain { input.commitText(marker + words, 1) }
+            waitUntil("the item to wrap and be indented") {
+                text.layout.lineCount > 1 &&
+                    shown().getSpans(0, text.length(), android.text.style.LeadingMarginSpan::class.java).isNotEmpty()
+            }
+            onMain {
+                val layout = text.layout
+                val content = layout.getPrimaryHorizontal(marker.length)
+                val wrapped = layout.getPrimaryHorizontal(layout.getLineStart(1))
+                assertTrue("$marker: wrapped caret at $wrapped, text at $content", content > 0f)
+                assertEquals("$marker: wrapped line caret", content, wrapped, 2f)
+                // Typing at the end keeps the wrapped line indented.
+                input.commitText(" today", 1)
+                val last = layout.lineCount - 1
+                assertEquals("$marker: caret after typing", content, layout.getPrimaryHorizontal(layout.getLineStart(last)), 2f)
+            }
+        }
+    }
+
     private fun paste(value: String) = onMain {
         context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("pasted", value))
         text.onTextContextMenuItem(android.R.id.paste)

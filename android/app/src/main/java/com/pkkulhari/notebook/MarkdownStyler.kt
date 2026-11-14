@@ -67,8 +67,11 @@ class MarkdownStyler(private val text: NoteEditText) {
     var onLink: ((String?) -> Unit)? = null
     private var link: String? = null
 
-    /** A `null` style is a list item's hanging indent. */
-    private data class Key(val style: Style?, val start: Int, val end: Int)
+    /**
+     * A `null` style is a list item's hanging indent. It covers the item's
+     * whole first line, and is as wide as the `marker` characters at its start.
+     */
+    private data class Key(val style: Style?, val start: Int, val end: Int, val marker: Int = 0)
 
     private class Styled(val key: Key, val spans: List<Any>)
 
@@ -83,10 +86,16 @@ class MarkdownStyler(private val text: NoteEditText) {
         val hidden: MutableSet<TextRange>,
     ) {
         companion object {
-            fun of(document: MarkdownDocument) = Parsed(
+            fun of(document: MarkdownDocument, source: String) = Parsed(
                 document,
                 document.spans().mapTo(HashSet()) { Key(it.style, it.start, it.end) },
-                document.listMarkers().mapTo(HashSet()) { Key(null, it.start, it.end) },
+                // Android finds a line's leading margin among the spans in that
+                // line, when it places the caret or maps a tap. A span on the
+                // marker alone indents the wrapped lines' text but not the caret.
+                document.listMarkers().mapTo(HashSet()) {
+                    val end = source.indexOf('\n', it.end).let { newline -> if (newline < 0) source.length else newline }
+                    Key(null, it.start, end, it.end - it.start)
+                },
                 document.hiddenSyntax().toHashSet(),
             )
         }
@@ -191,7 +200,7 @@ class MarkdownStyler(private val text: NoteEditText) {
         generation += 1
         val document = parseMarkdown(body)
         setDocument(document)
-        restyle(body, cursor, cursor, Parsed.of(document))
+        restyle(body, cursor, cursor, Parsed.of(document, body))
     }
 
     fun attach() {
@@ -233,7 +242,7 @@ class MarkdownStyler(private val text: NoteEditText) {
         PARSER.execute {
             if (generation != newest) return@execute
             val document = parseMarkdown(source)
-            val parsed = Parsed.of(document)
+            val parsed = Parsed.of(document, source)
             main.post {
                 if (generation != this.generation) return@post document.close()
                 setDocument(document)
@@ -315,7 +324,9 @@ class MarkdownStyler(private val text: NoteEditText) {
         for (key in wanted) {
             if (key.start >= key.end || key.end > target.length) continue
             val spans = create(target, key)
-            for (span in spans) target.setSpan(span, key.start, key.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            // An indent grows with text typed at the end of its line.
+            val flags = if (key.style == null) Spanned.SPAN_EXCLUSIVE_INCLUSIVE else Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+            for (span in spans) target.setSpan(span, key.start, key.end, flags)
             kept += Styled(key, spans)
             changed += key.start until key.end
         }
@@ -344,7 +355,7 @@ class MarkdownStyler(private val text: NoteEditText) {
         Style.LIST_ITEM_START -> listOf(SpaceAbove(text.context.dp(3)))
         // A list item's wrapped lines line up with its text, not its bullet.
         null -> listOf(
-            LeadingMarginSpan.Standard(0, ceil(Layout.getDesiredWidth(target, key.start, key.end, text.paint)).toInt()),
+            LeadingMarginSpan.Standard(0, ceil(Layout.getDesiredWidth(target, key.start, key.start + key.marker, text.paint)).toInt()),
         )
     }
 
